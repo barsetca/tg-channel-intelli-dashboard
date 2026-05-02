@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     telegram_api_id: int | None = None
     telegram_api_hash: str | None = None
     telegram_session_name: str = "telegram_session"
+    # Директория для TelegramClient (*.session относительно cwd backend или абсолютный путь)
+    telegram_session_dir: str = "data/sessions"
+    # Макс. секунд ожидания при одном FloodWait (Telegram вернёт другое значение сверх этого — всё равно ждём min)
+    telegram_flood_max_wait_seconds: int = 60
+    # Число повторов операции после FloodWait (не считая первый вызов)
+    telegram_flood_retry_attempts: int = 2
 
     openai_api_key: str | None = None
     openai_embedding_model: str = "text-embedding-3-small"
