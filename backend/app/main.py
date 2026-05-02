@@ -1,20 +1,28 @@
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+import app.models  # noqa: F401 — register ORM models with metadata for Alembic
 from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.database import engine
-
-import app.models  # noqa: F401 — register ORM models with metadata for Alembic
+from app.integrations.telethon import TelethonUserSessionService
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
-    yield
-    await engine.dispose()
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    tg = TelethonUserSessionService(settings)
+    telegram_ok = await tg.startup_for_fastapi()
+    app.state.telegram_service = tg if telegram_ok else None
+    try:
+        yield
+    finally:
+        svc = app.state.telegram_service
+        if svc is not None:
+            await svc.disconnect()
+        await engine.dispose()
 
 
 app = FastAPI(
