@@ -1,6 +1,7 @@
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -20,6 +21,18 @@ engine = create_async_engine(
     settings.database_url,
     echo=settings.environment == "development",
 )
+
+
+@event.listens_for(engine.sync_engine, "connect")
+def _sqlite_enable_foreign_keys(dbapi_connection: object, _connection_record: object) -> None:
+    """Для SQLite включаем поддержку ON DELETE / FOREIGN KEY на каждом соединении."""
+    url = str(engine.url)
+    if "sqlite" not in url.lower():
+        return
+    cursor = dbapi_connection.cursor()  # type: ignore[union-attr]
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
 
 AsyncSessionLocal = async_sessionmaker(
     engine,

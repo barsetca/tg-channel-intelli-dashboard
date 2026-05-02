@@ -164,6 +164,78 @@ docker compose up qdrant
 
 ---
 
+## Схема данных SQLite (ORM)
+
+> Соответствие функциональным сценариям закреплено в текстовом каталоге [`context/user_scenario.txt`](context/user_scenario.txt) (и дубль в PDF там же при наличии). Ниже — как сущности покрывают сценарии 1–8.
+
+### Единое место с моделями
+
+В Python **нельзя** одновременно иметь модуль **`models.py`** и пакет **`models/`** с тем же именем. Поэтому ORM описан **пакетом** [`backend/app/models/`](backend/app/models/): каждая таблица в своём файле, сборка экспортов и список сущностей — в [`__init__.py`](backend/app/models/__init__.py). Это и есть логический аналог «одного большого `models.py`».
+
+| Таблица | Назначение и сценарии | Связи и ключевые поля |
+|---------|------------------------|-------------------------|
+| **audit_runs** | Сцен. **1, 8** (и общий журнал аудита: **5** сравнение и др. через `audit_kind`) | `audit_kind`, `raw_user_input_json`, `planner_output_json`, `quality_gate_json` (manual review), `result_summary_json`, `status`; дочерние строки → **audit_run_items**. |
+| **audit_run_items** | Гранулярные «records» результатов поиска канала (сцен. **1**) | FK **→ audit_runs** cascade; FK **→ channels** SET NULL; `snapshot_json` (карточка канала во время выдачи), `relevance_score`, `display_order`; `telegram_username_fallback` если канала ещё нет в `channels`. |
+| **channels** | Каналы, карточка сцен. **1**, сбор сцен. **2** | `telegram_id` (unique), `username`; **карточка**: `invite_slug`, `last_post_at`, `posts_per_week_estimate`, `primary_topic`, `topics_json`, `contact_info_json`, язык/регион; `is_public_accessible` (проверка доступа сцен. 2); `sync_status`, `subscriber_count`, `extras_json`. |
+| **posts** | Сообщения, сцен. **2–3** и RAG (**4**) | FK **→ channels**; `views_count` / `forwards_count` из TG; текст, медиа, `raw_payload_json`. |
+| **snapshots** | Временные срезы (частота, подписчики и т.д.) | FK **→ channels**; **kind**, `metrics_json`, `sampled_at`. |
+| **analyses** | Пайплайны LLM: сводки постов (**3**), отчёт по каналу (**2**); сравнение (**5**) через `analyzer_id` + JSON | XOR субъект: channel \| post \| snapshot (`CHECK`). `result_json`, `input_refs_json`, `llm_model`. |
+| **recommendations** | Рекомендации, в т.ч. **похожие каналы (6)** | FK **→ analyses**, **→ search_runs**; **`seed_channel_id`**, **`target_channel_id`** (ON DELETE SET NULL). |
+| **search_runs** | Сцен. **4** semantic search | Запрос, фильтры, метрики; **`answer_synthesis_json`**, **`retrieved_sources_json`** (ответ и источники после retrieval + LLM). |
+| **export_jobs** | Сцен. **7** экспорт | `export_format`, `scope_json`, `artifact_path`, `status`, TTL `expires_at`. |
+| **embeddings_metadata** | Связка поста с Qdrant (**3–4–6**) | FK **→ posts**; точка коллекции, модель, `chunk_index`. |
+
+На всех сущностях с таймстампами используется миксин **`created_at` / `updated_at`** (`app/models/base.py`).
+
+У внешних ключей включён режим **`PRAGMA foreign_keys=ON`** для соединений SQLite ([`database.py`](backend/app/core/database.py)).
+
+### Диаграмма связей (упрощённо)
+
+```mermaid
+flowchart LR
+    audit_runs --- audit_run_items
+    audit_run_items --- channels
+    channels --- posts
+    channels --- snapshots
+    channels --- analyses_ch["analyses(channel_id)"]
+    posts --- analyses_po["analyses(post_id)"]
+    snapshots --- analyses_sn["analyses(snapshot_id)"]
+    posts --- embeddings_metadata
+    analyses_ch --- recommendations
+    analyses_po --- recommendations
+    analyses_sn --- recommendations
+    search_runs --- recommendations
+    channels --- recommendations_seed["reco seed/target"]
+```
+
+### Миграции Alembic
+
+Из каталога **`backend/`** (переменные окружения и `DATABASE_URL` как для приложения):
+
+```bash
+PYTHONPATH=. python3 -m alembic upgrade head          # применить
+PYTHONPATH=. python3 -m alembic revision --autogenerate -m "описание"  # после правок моделей
+PYTHONPATH=. python3 -m alembic downgrade -1          # откат на один шаг
+```
+
+В Docker перед API выполняется `alembic upgrade head` (см. `backend/docker-entrypoint.sh`).
+
+Основные ревизии:
+
+- **`257b8a875354`** — начальная таблица `channels`.
+- **`0e1a9783a0bb`** — доменные таблицы, расширение `channels`.
+- **`15766a843b39`** — сценарии из `user_scenario.txt`: `audit_runs` / `audit_run_items`, `export_jobs`, поля канала/поста/рекомендаций/семантического поиска.
+
+Если применение миграции на SQLite прервалось посередине, таблицы могли частично появиться при неизменном `alembic_version`: удалите файл БД или откатите вручную фрагменты и выполните `alembic upgrade head` заново.
+
+### Масштабирование и эволюция
+
+- **SQLite** подходит для одного записывающего процесса (типичный воркер синхронизации + API только читает или пишет в очередь). При росте конкуренции записей планируйте **PostgreSQL** / управляемый сервис и замените `DATABASE_URL`; ORM модели без сильной привязки к SQLite совместимы с переносом (JSON, `CheckConstraint`).
+- **`posts`** — самая большая таблица: партиционирование на уровне СУБД в SQLite недоступно; стратегия — архивирование старых `channel_id` в отдельный файл/БД, **VACUUM**, при необходимости вынесение полнотекста в FTS5 или внешний поисковик.
+- **`search_runs`** — журнал: включайте TTL/выгрузку в аналитическое хранилище или обрезку по времени.
+- **`embeddings_metadata`** — только ссылки на Qdrant; при смене коллекции поддерживайте миграции точек в Qdrant и консистентность с этой таблицей транзакциями приложения или фоновыми задачами.
+- **Тяжёлые поля JSON** держите схематично документированными (конвенции ключей в команде); при необходимости версионируйте `analyzer_id` / типы snapshot `kind`.
+
 ## Структура репозитория (кратко)
 
 - **`backend/`** — приложение FastAPI, слои `api`, `services`, `repositories`, `models`, `schemas`, интеграции и AI-пайплайны.
