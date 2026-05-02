@@ -1,0 +1,64 @@
+from functools import lru_cache
+from pathlib import Path
+from typing import Literal
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=(".env", "../.env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    environment: Literal["development", "staging", "production"] = "development"
+    log_level: str = "INFO"
+
+    backend_host: str = "0.0.0.0"
+    backend_port: int = 8000
+    backend_cors_origins: str = "http://localhost:3000"
+
+    database_url: str = Field(
+        default="sqlite+aiosqlite:///./data/app.db",
+        validation_alias="DATABASE_URL",
+    )
+
+    telegram_api_id: int | None = None
+    telegram_api_hash: str | None = None
+    telegram_session_name: str = "telegram_session"
+
+    openai_api_key: str | None = None
+    openai_embedding_model: str = "text-embedding-3-small"
+    openai_chat_model: str = "gpt-4o-mini"
+
+    qdrant_url: str = "http://localhost:6333"
+    qdrant_api_key: str | None = None
+    qdrant_collection_name: str = "channel_messages"
+
+    @field_validator("telegram_api_id", mode="before")
+    @classmethod
+    def empty_str_to_none_int(cls, v: object) -> object:
+        if v == "" or v is None:
+            return None
+        return v
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.backend_cors_origins.split(",") if o.strip()]
+
+    @property
+    def sqlite_path(self) -> Path | None:
+        prefix = "sqlite+aiosqlite:///"
+        if self.database_url.startswith(prefix):
+            return Path(self.database_url.removeprefix(prefix))
+        return None
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()

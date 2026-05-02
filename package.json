@@ -1,0 +1,12 @@
+{
+  "name": "tg-channel-intelligence-dashboard",
+  "private": true,
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "dev:web": "npm run dev --workspace @tgci/web",
+    "build:web": "npm run build --workspace @tgci/web",
+    "lint:web": "npm run lint --workspace @tgci/web"
+  }
+}
