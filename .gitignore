@@ -1,0 +1,33 @@
+# Root
+.env
+*.session
+.env.local
+.env.*.local
+*.pem
+.DS_Store
+
+# Python / backend
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/.pytest_cache/
+backend/.mypy_cache/
+backend/.ruff_cache/
+backend/htmlcov/
+backend/.coverage
+backend/dist/
+backend/build/
+backend/*.egg-info/
+backend/data/*.db
+backend/data/*.db-journal
+
+# Node / frontend
+apps/web/node_modules/
+apps/web/.next/
+apps/web/out/
+apps/web/.turbo
+
+# IDE
+.idea/
+.vscode/
+*.swp
