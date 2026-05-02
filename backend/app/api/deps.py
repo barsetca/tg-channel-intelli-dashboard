@@ -1,10 +1,12 @@
 from collections.abc import AsyncGenerator
+from typing import Annotated
 
-from fastapi import Depends
+from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
 from app.core.database import get_db_session
+from app.integrations.telethon.user_session_service import TelethonUserSessionService
 from app.services.channel_service import ChannelService
 from app.services.health_service import HealthService
 
@@ -28,3 +30,29 @@ def get_channel_service(
     session: AsyncSession = Depends(get_session),
 ) -> ChannelService:
     return ChannelService(session)
+
+
+def get_telethon_user_session_service_dep(request: Request) -> TelethonUserSessionService:
+    """
+    Возвращает подключённый Telethon-сервис из ``app.state``
+    (lifespan создаёт сессию при старте).
+
+    Если клиент недоступен (нет ключей или сессии), отвечает 503;
+    эндпоинты трактуют это как временную деградацию.
+    """
+    svc = getattr(request.app.state, "telegram_service", None)
+    if svc is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Интеграция Telegram (пользовательская сессия) недоступна: "
+                "проверьте TELEGRAM_API_ID/HASH и наличие авторизованного .session файла."
+            ),
+        )
+    return svc
+
+
+TelethonUserSessionServiceDep = Annotated[
+    TelethonUserSessionService,
+    Depends(get_telethon_user_session_service_dep),
+]
