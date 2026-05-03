@@ -244,3 +244,42 @@ PYTHONPATH=. python3 -m alembic downgrade -1          # откат на один
 - **`.env.example`** — образец переменных окружения.
 
 Дополнительные команды только для backend см. в [backend/README.md](backend/README.md).
+
+## Документация
+
+| Тема | Файл |
+|------|------|
+| **Метрики каналов** — формулы (`avg_views`, частота постов, вовлечённость, активность, регулярность), расшифровка переменных, веса `MetricWeights` | [backend/docs/CHANNEL_METRICS.md](backend/docs/CHANNEL_METRICS.md) |
+| **Telegram (Telethon)** — сессия, переменные окружения, FastAPI | [backend/docs/TELEGRAM_TELETHON.md](backend/docs/TELEGRAM_TELETHON.md) |
+
+<h2 id="backend-tests">Тесты (backend)</h2>
+
+Запуск из каталога **`backend/`** (нужен dev-набор зависимостей: `pip install -e ".[dev]"`):
+
+```bash
+cd backend
+PYTHONPATH=. python3 -m pytest tests/ -q
+```
+
+Только метрики каналов:
+
+```bash
+PYTHONPATH=. python3 -m pytest tests/test_channel_metrics_compute.py -v
+```
+
+Только интеграционные юнит-тесты Telethon (моки, без реальной сети):
+
+```bash
+PYTHONPATH=. python3 -m pytest tests/test_telethon_*.py -q
+```
+
+### Что проверяют основные тесты
+
+| Файл | Назначение |
+|------|------------|
+| `tests/test_channel_metrics_compute.py` | Движок метрик: пустые выборки, среднее просмотров, частота при двух постах и при «серии» в один день, прокси вовлечённости по `forwards`/`views`, регулярность интервалов (ровные / неровные / один пост), композитный `activity_score`, полный снимок `compute_channel_metrics`, валидация суммы весов в `MetricWeights`. |
+| `tests/test_telethon_exceptions.py` | Маппинг ошибок Telethon → доменные исключения (`FloodWait`, username, private channel, `coerce_to_telegram_error`). |
+| `tests/test_telethon_rate_limit.py` | Повтор запросов после `FloodWait` с подменой `asyncio.sleep`, исчерпание попыток, проброс немаппируемых ошибок. |
+| `tests/test_telethon_user_session_service.py` | Сервис Telethon на заглушках клиента: фильтр мегагрупп в поиске, `resolve_channel` для не-канала, защита при отсутствии клиента, `_guarded_call` с ретраем FloodWait. |
+
+Конфигурация `pytest` (в т.ч. `asyncio_mode = auto`) задаётся в [`backend/pyproject.toml`](backend/pyproject.toml) в секции `[tool.pytest.ini_options]`.
