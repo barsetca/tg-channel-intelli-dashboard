@@ -251,6 +251,7 @@ PYTHONPATH=. python3 -m alembic downgrade -1          # откат на один
 |------|------|
 | **Метрики каналов** — формулы (`avg_views`, частота постов, вовлечённость, активность, регулярность), расшифровка переменных, веса `MetricWeights` | [backend/docs/CHANNEL_METRICS.md](backend/docs/CHANNEL_METRICS.md) |
 | **Telegram (Telethon)** — сессия, переменные окружения, FastAPI | [backend/docs/TELEGRAM_TELETHON.md](backend/docs/TELEGRAM_TELETHON.md) |
+| **AI pipeline** — RAG, tools, стадии, SQL vs Qdrant, библиотеки, confidence | [backend/docs/AI_PIPELINE_ARCHITECTURE.md](backend/docs/AI_PIPELINE_ARCHITECTURE.md) |
 
 <h2 id="backend-tests">Тесты (backend)</h2>
 

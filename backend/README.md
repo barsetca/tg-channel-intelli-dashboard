@@ -24,3 +24,5 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 Доменные ORM-модели и связи описаны в пакете `app/models/`; обзор схемы, миграций и советы по масштабированию — в [README репозитория](../README.md#схема-данных-sqlite-orm).
 
 Метрики каналов (формулы, входные поля): [docs/CHANNEL_METRICS.md](docs/CHANNEL_METRICS.md).
+
+Архитектура AI pipeline (RAG, tools, стадии, SQL/Qdrant): [docs/AI_PIPELINE_ARCHITECTURE.md](docs/AI_PIPELINE_ARCHITECTURE.md).
