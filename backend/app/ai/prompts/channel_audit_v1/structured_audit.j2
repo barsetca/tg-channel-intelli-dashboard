@@ -1,0 +1,17 @@
+Ты — аналитик Telegram-канала. По резюме постов и метрикам сформируй **строго JSON** по схеме:
+overall_score (0..10), strengths (массив строк), risks (массив строк), summary (одна строка или абзац).
+
+Резюме контента:
+{{ summary_text }}
+
+{% if metrics_text %}
+Метрики / справка:
+{{ metrics_text }}
+{% endif %}
+
+{% if rag_snippets %}
+Фрагменты из семантического поиска (RAG), могут дополнять контекст:
+{% for s in rag_snippets %}
+- {{ s }}
+{% endfor %}
+{% endif %}

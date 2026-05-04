@@ -15,6 +15,8 @@ dependencies = [
     "telethon>=1.36.0",
     "openai>=1.55.0",
     "qdrant-client>=1.12.0",
+    "jinja2>=3.1.0",
+    "tenacity>=9.0.0",
 ]
 
 [project.optional-dependencies]

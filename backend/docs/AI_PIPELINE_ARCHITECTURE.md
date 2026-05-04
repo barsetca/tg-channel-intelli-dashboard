@@ -229,3 +229,9 @@ flowchart TD
 | Библиотеки | `openai`, `pydantic`, `sqlalchemy`, `qdrant-client`; рекомендованы `Jinja2`, `tenacity`; без обязательного LangChain. |
 
 Дальнейшая детализация по конкретным `analyzer_id` и JSON-схемам — в отдельных спецификациях или в коде `app/ai/schemas/` по мере реализации.
+
+---
+
+## 10. Реализация в репозитории (эталон `channel_audit_v1`)
+
+Рабочий каркас pipeline: пакет **`app/ai/`** — оркестратор `ChannelAnalysisPipeline`, стадии в `app/ai/stages/`, промпты Jinja2 в `app/ai/prompts/channel_audit_v1/`, клиент OpenAI с ретраями `app/ai/clients/openai_chat.py`, агрегация confidence `app/ai/confidence.py`. Точка входа: `await ChannelAnalysisPipeline().run(ChannelPipelineInput(...))` (см. docstring в `app/ai/orchestration/pipeline.py`). Юнит-тесты без сети: `tests/test_ai_pipeline_unit.py`.
