@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     telegram_session_name: str = "telegram_session"
     # Директория для TelegramClient (*.session относительно cwd backend или абсолютный путь)
     telegram_session_dir: str = "data/sessions"
-    # Макс. секунд ожидания при одном FloodWait (Telegram вернёт другое значение сверх этого — всё равно ждём min)
+    # Макс. секунд ожидания при одном FloodWait (если Telegram вернёт больше — ждём min).
     telegram_flood_max_wait_seconds: int = 60
     # Число повторов операции после FloodWait (не считая первый вызов)
     telegram_flood_retry_attempts: int = 2
@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str | None = None
     qdrant_collection_name: str = "channel_messages"
+
+    # Макс. символов на чанк перед эмбеддингом (грубая защита лимита токенов модели).
+    embedding_max_chunk_chars: int = 12000
+    # Размерность вектора (1536 для text-embedding-3-small). 0 — не проверять после API.
+    openai_embedding_dimensions: int = 1536
 
     @field_validator("telegram_api_id", mode="before")
     @classmethod
