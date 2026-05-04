@@ -1,5 +1,5 @@
 from collections.abc import AsyncGenerator
-from typing import Annotated
+from typing import Annotated, cast
 
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +9,8 @@ from app.core.database import get_db_session
 from app.integrations.telethon.user_session_service import TelethonUserSessionService
 from app.services.channel_service import ChannelService
 from app.services.health_service import HealthService
+from app.services.intelligence_service import IntelligenceService
+from app.services.vector_service import VectorService
 
 
 def get_settings_dep() -> Settings:
@@ -32,6 +34,27 @@ def get_channel_service(
     return ChannelService(session)
 
 
+def get_intelligence_service(
+    session: AsyncSession = Depends(get_session),
+) -> IntelligenceService:
+    """Сервис сценариев intelligence (поиск, анализ, сравнение, экспорт)."""
+    return IntelligenceService(session)
+
+
+async def get_vector_service() -> AsyncGenerator[VectorService, None]:
+    """
+    Жизненный цикл VectorService на запрос: connect при входе, close при выходе.
+
+    Так Qdrant/OpenAI клиенты не висят глобально между запросами.
+    """
+    svc = VectorService()
+    await svc.connect()
+    try:
+        yield svc
+    finally:
+        await svc.close()
+
+
 def get_telethon_user_session_service_dep(request: Request) -> TelethonUserSessionService:
     """
     Возвращает подключённый Telethon-сервис из ``app.state``
@@ -49,7 +72,7 @@ def get_telethon_user_session_service_dep(request: Request) -> TelethonUserSessi
                 "проверьте TELEGRAM_API_ID/HASH и наличие авторизованного .session файла."
             ),
         )
-    return svc
+    return cast(TelethonUserSessionService, svc)
 
 
 TelethonUserSessionServiceDep = Annotated[
