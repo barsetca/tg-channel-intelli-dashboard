@@ -206,3 +206,6 @@ def test_openapi_contains_routes() -> None:
     assert "/api/v1/analyze/{channel_id}" in paths
     assert "/api/v1/semantic-search" in paths
     assert "/api/v1/recommendations/{channel_id}" in paths
+    assert "/api/v1/telegram/auth/start" in paths
+    assert "/api/v1/telegram/status" in paths
+    assert "/api/v1/orchestration/jobs/{job_id}" in paths

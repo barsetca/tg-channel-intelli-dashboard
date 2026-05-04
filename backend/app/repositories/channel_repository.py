@@ -1,3 +1,5 @@
+from collections.abc import Sequence
+
 from sqlalchemy import desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -57,3 +59,63 @@ class ChannelRepository(BaseRepository[Channel]):
         stmt = stmt.limit(limit)
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def existing_telegram_ids_among(self, telegram_ids: Sequence[int]) -> set[int]:
+        """Множество telegram_id, которые уже есть в каталоге (для new_only)."""
+        ids = list({int(x) for x in telegram_ids})
+        if not ids:
+            return set()
+        result = await self._session.execute(select(Channel.telegram_id).where(Channel.telegram_id.in_(ids)))
+        return {int(x) for x in result.scalars().all()}
+
+    async def upsert_discovery_channel(
+        self,
+        *,
+        telegram_id: int,
+        username: str | None,
+        title: str | None,
+        description: str | None,
+        subscriber_count: int | None,
+        invite_slug: str | None,
+        primary_topic: str | None,
+        language_hint: str | None,
+        region_country: str | None,
+    ) -> Channel:
+        """Создать или обновить канал по результатам discovery (сценарий 1)."""
+        existing = await self.get_by_telegram_id(telegram_id)
+        if existing is not None:
+            if username is not None:
+                existing.username = username
+            if title is not None:
+                existing.title = title
+            if description is not None:
+                existing.description = description
+            if subscriber_count is not None:
+                existing.subscriber_count = subscriber_count
+            if invite_slug is not None:
+                existing.invite_slug = invite_slug
+            if primary_topic is not None:
+                existing.primary_topic = primary_topic
+            if language_hint is not None:
+                existing.language_hint = language_hint
+            if region_country is not None:
+                existing.region_country = region_country
+            existing.sync_status = "discovered"
+            await self._session.flush()
+            await self._session.refresh(existing)
+            return existing
+
+        ch = Channel(
+            telegram_id=telegram_id,
+            username=username,
+            title=title,
+            description=description,
+            subscriber_count=subscriber_count,
+            invite_slug=invite_slug,
+            primary_topic=primary_topic,
+            language_hint=language_hint,
+            region_country=region_country,
+            sync_status="discovered",
+            is_public_accessible=True,
+        )
+        return await self.add(ch)

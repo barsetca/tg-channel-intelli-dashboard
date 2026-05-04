@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import uuid
 from collections.abc import Sequence
 from typing import Any
 
@@ -26,9 +27,11 @@ from app.ai.stages.summarization import run_summarization
 from app.core.config import Settings, get_settings
 from app.models.analysis import Analysis
 from app.models.post import Post
+from app.orchestration.coordinator import OrchestrationCoordinator
 from app.repositories.channel_repository import ChannelRepository
 from app.schemas.intelligence import (
     AnalyzeChannelResponse,
+    BackgroundSearchJob,
     ChannelCard,
     ChannelDetail,
     CompareChannelRow,
@@ -48,10 +51,35 @@ from app.services.vector_service import VectorService
 class IntelligenceService:
     """Сервис доменных сценариев dashboard (без привязки к HTTP)."""
 
-    def __init__(self, session: AsyncSession, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        settings: Settings | None = None,
+        *,
+        coordinator: OrchestrationCoordinator | None = None,
+        telethon_live_available: bool = False,
+        telethon_startup_failure: str | None = None,
+    ) -> None:
         self._session = session
         self._settings = settings or get_settings()
         self._channels = ChannelRepository(session)
+        self._coordinator = coordinator
+        self._telethon_live_available = telethon_live_available
+        self._telethon_startup_failure = telethon_startup_failure
+
+    def _telegram_live_unavailable_detail(self) -> str:
+        """Пояснение для ``background_job`` когда live-поиск недоступен (без постановки в очередь)."""
+        if not (self._settings.telegram_api_id and self._settings.telegram_api_hash):
+            return "Telegram (live) недоступен: задайте TELEGRAM_API_ID и TELEGRAM_API_HASH."
+        base = (
+            "Telegram (live) недоступен: при старте API не удалось поднять сессию Telethon. "
+            "Запрос телефона при поиске не выполняется — сначала авторизуйтесь через "
+            "POST /api/v1/telegram/auth/start → /auth/code (при 2FA — /auth/password), "
+            "либо задайте TELEGRAM_SESSION / валидный .session и перезапустите API."
+        )
+        if self._telethon_startup_failure:
+            return f"{base} Подробности: {self._telethon_startup_failure}"
+        return base
 
     def _manual_review_too_broad(self, body: SearchChannelsRequest) -> ManualReviewFlags | None:
         """Сценарий 8: слишком общий запрос без уточняющих фильтров."""
@@ -97,6 +125,44 @@ class IntelligenceService:
                 channels=[],
                 manual_review=review,
                 normalized_filters=body.model_dump(),
+                background_job=None,
+            )
+
+        if body.search_source == "telegram_live":
+            if self._coordinator is None:
+                return SearchChannelsResponse(
+                    channels=[],
+                    manual_review=None,
+                    normalized_filters=body.model_dump(),
+                    background_job=BackgroundSearchJob(
+                        job_id=str(uuid.uuid4()),
+                        status="failed",
+                        detail="OrchestrationCoordinator не смонтирован (lifespan приложения).",
+                    ),
+                )
+            if not self._telethon_live_available:
+                return SearchChannelsResponse(
+                    channels=[],
+                    manual_review=None,
+                    normalized_filters=body.model_dump(),
+                    background_job=BackgroundSearchJob(
+                        job_id=str(uuid.uuid4()),
+                        status="failed",
+                        detail=self._telegram_live_unavailable_detail(),
+                    ),
+                )
+            job_id = await self._coordinator.schedule_telegram_channel_discovery(
+                payload=body.model_dump(),
+            )
+            return SearchChannelsResponse(
+                channels=[],
+                manual_review=None,
+                normalized_filters=body.model_dump(),
+                background_job=BackgroundSearchJob(
+                    job_id=job_id,
+                    status="queued",
+                    detail="Задание поставлено в очередь: Telethon → SQLite → metrics → AI → vector.",
+                ),
             )
 
         rows = await self._channels.search_catalog(
@@ -113,6 +179,7 @@ class IntelligenceService:
             channels=cards,
             manual_review=None,
             normalized_filters=body.model_dump(),
+            background_job=None,
         )
 
     async def get_channel_detail(self, channel_id: int) -> ChannelDetail | None:

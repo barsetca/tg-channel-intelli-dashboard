@@ -14,20 +14,20 @@ export default async function HealthPage() {
 
   return (
     <main className="mx-auto max-w-xl px-6 py-16">
-      <Link href="/" className="text-sm text-zinc-500 hover:text-zinc-300">
+      <Link href="/" className="text-sm text-zinc-600 hover:text-zinc-900">
         ← Back
       </Link>
-      <h1 className="mt-4 text-xl font-semibold text-zinc-100">API health</h1>
+      <h1 className="mt-4 text-xl font-semibold text-zinc-900">API health</h1>
       {payload ? (
-        <pre className="mt-6 overflow-auto rounded-lg bg-zinc-900 p-4 text-sm text-zinc-300">
+        <pre className="mt-6 overflow-auto rounded-lg border border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-700">
           {JSON.stringify(payload, null, 2)}
         </pre>
       ) : (
-        <p className="mt-6 text-sm text-red-400">
+        <p className="mt-6 text-sm text-red-600">
           {error ?? "No data"}
-          <span className="mt-2 block text-zinc-500">
+          <span className="mt-2 block text-zinc-600">
             Set{" "}
-            <code className="rounded bg-zinc-800 px-1">NEXT_PUBLIC_API_BASE_URL</code> and run the
+            <code className="rounded bg-zinc-100 px-1 text-zinc-800">NEXT_PUBLIC_API_BASE_URL</code> and run the
             API.
           </span>
         </p>
