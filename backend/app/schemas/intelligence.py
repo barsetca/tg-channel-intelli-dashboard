@@ -32,6 +32,10 @@ class SearchChannelsRequest(BaseModel):
         max_length=2000,
         description="Доп. условия свободным текстом",
     )
+    search_source: Literal["saved_catalog", "telegram_live"] = Field(
+        "saved_catalog",
+        description="Где искать: локальный каталог (SQLite) или живой Telegram (Telethon, фоновая задача)",
+    )
 
     @model_validator(mode="after")
     def subscriber_range_consistent(self) -> Self:
@@ -50,6 +54,18 @@ class ManualReviewFlags(BaseModel):
     needs_review: bool = Field(..., description="Требуется уточнение запроса пользователем")
     reason: str = Field(..., description="Короткая причина")
     hints: list[str] = Field(default_factory=list, description="Рекомендации по уточнению")
+
+
+class BackgroundSearchJob(BaseModel):
+    """Фоновый поиск в Telegram; каналы появятся в каталоге после ingest."""
+
+    job_id: str = Field(..., description="Идентификатор задания в OrchestrationCoordinator")
+    kind: Literal["telegram_channel_discovery"] = "telegram_channel_discovery"
+    status: Literal["queued", "running", "completed", "failed"] = Field(
+        "queued",
+        description="Состояние pipeline на момент ответа HTTP",
+    )
+    detail: str = Field("", description="Пояснение для UI / отладки")
 
 
 class ChannelCard(BaseModel):
@@ -82,6 +98,10 @@ class SearchChannelsResponse(BaseModel):
     normalized_filters: dict[str, object] = Field(
         default_factory=dict,
         description="Нормализованные фильтры (для аудита / UI)",
+    )
+    background_job: BackgroundSearchJob | None = Field(
+        None,
+        description="При search_source=telegram_live — фоновое задание Telethon→SQLite→…",
     )
 
 

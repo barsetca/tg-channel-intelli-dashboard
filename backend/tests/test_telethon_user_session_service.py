@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from telethon.errors import FloodWaitError
@@ -13,6 +13,7 @@ from telethon.tl.types import Channel, ChatPhotoEmpty, Message, PeerChannel
 
 from app.core.config import Settings
 from app.integrations.telethon.exceptions import (
+    TelegramAuthRequiredError,
     TelegramInvalidIdentifierError,
     TelegramTelethonError,
 )
@@ -126,7 +127,7 @@ async def test_resolve_channel_raises_if_not_channel() -> None:
 async def test_connected_guard_raises_when_no_client() -> None:
     svc = TelethonUserSessionService(settings=_test_settings())
     svc._client = None
-    with pytest.raises(TelegramTelethonError, match="недоступен"):
+    with pytest.raises(TelegramAuthRequiredError, match="Сессия не авторизована"):
         await svc.search_public_channels("x")
 
 
@@ -136,6 +137,7 @@ async def test_guarded_call_flood_retries_then_success(monkeypatch: pytest.Monke
 
     cli = MagicMock()
     cli.is_connected.return_value = True
+    cli.is_user_authorized = AsyncMock(return_value=True)
     svc._client = cli
 
     calls = 0

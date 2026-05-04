@@ -15,11 +15,12 @@
 
 ## Назначение и границы
 
-- **Подключение через user session**: Telethon сохраняет ключи авторизации в файле `*.session` в каталоге `TELEGRAM_SESSION_DIR` (имя задаётся `TELEGRAM_SESSION_NAME`).
+- **Подключение через user session**: либо переменная **`TELEGRAM_SESSION`** (StringSession, приоритет над файлом и удобна в Docker/K8s), либо файл `*.session` в каталоге `TELEGRAM_SESSION_DIR` (имя — `TELEGRAM_SESSION_NAME`), если строка не задана.
 - **Поиск публичных каналов** через `contacts.Search` с возможностью скрыть мегагруппы (`broadcast_only=True` по умолчанию).
 - **Метаданные канала** через `channels.getFullChannel` (после `get_input_entity` из сущности `Channel`).
 - **Последние N постов** через `client.get_messages` с сортировкой по дате (старые первыми) и фильтром сервисных сообщений (поле `action`).
-- **`TelethonUserSessionService` не выполняет интерактивный первый вход** (SMS-код и 2FA). Без готового `.session` метод `connect()` поднимает `TelegramAuthRequiredError`; HTTP-слой получает недоступный сервис через зависимость (см. ниже).
+- **Интерактивный первый вход** (телефон → код → 2FA) доступен через REST: ``POST /api/v1/telegram/auth/start``, ``/auth/code``, ``/auth/password`` (см. OpenAPI). Выключается переменной ``TELEGRAM_INTERACTIVE_LOGIN=false`` (рекомендуется закрытый контур / только доверенные клиенты: риск перехвата кода и session string).
+- Без готовой сессии и без прохождения auth-эндпоинтов метод ``connect()`` поднимает ``TelegramAuthRequiredError``; зависимость Telethon в HTTP может вернуть 503.
 
 ## Конфигурация окружения
 
@@ -29,7 +30,9 @@
 |------------|-----------|
 | `TELEGRAM_API_ID` | Числовой идентификатор приложения |
 | `TELEGRAM_API_HASH` | Строка hash |
-| `TELEGRAM_SESSION_NAME` | Базовое имя файла сессии (Telethon добавит `.session`) |
+| `TELEGRAM_SESSION` | Строка **StringSession** (из `StringSession.save(client.session)` или ответа ``POST /telegram/auth/code``). Если задана, SQLite-файл сессии не используется. Можно обновить в окружении без рестарта — перед следующим RPC вызовется `ensure_session_for_api()`. |
+| `TELEGRAM_INTERACTIVE_LOGIN` | `true` / `false` — разрешить HTTP-шаги первого входа (по умолчанию `true` в dev; в production часто `false`). |
+| `TELEGRAM_SESSION_NAME` | Базовое имя файла сессии (Telethon добавит `.session`), когда `TELEGRAM_SESSION` пуст |
 | `TELEGRAM_SESSION_DIR` | Каталог для сессии (абсолютный путь или относительный к рабочей директории backend) |
 | `TELEGRAM_FLOOD_MAX_WAIT_SECONDS` | Верхний предел секунд ожидания **за один** FloodWait (актуально ограничивать мног часовые задержки) |
 | `TELEGRAM_FLOOD_RETRY_ATTEMPTS` | Количество **дополнительных** попыток после первой ошибки (итого попыток = `1 + N`) |
@@ -74,6 +77,17 @@ async def search_channels(q: str, telegram: TelethonUserSessionServiceDep):
     return await telegram.search_public_channels(q, limit=10)
 ```
 
+## Автоматическое получение / обновление сессии при API-вызовах
+
+Перед каждым RPC через ``_guarded_call`` вызывается ``ensure_session_for_api()``:
+
+- если клиент не подключён — выполняется ``connect()`` (StringSession из ``TELEGRAM_SESSION`` или файл);
+- если в окружении появилась **новая** строка ``TELEGRAM_SESSION`` при уже работающем файловом клиенте — выполняется переподключение с приоритетом строки;
+- если строковая сессия **изменилась** относительно последнего успешного подключения — клиент пересоздаётся;
+- при ошибках ``AuthKeyUnregisteredError``, ``SessionRevokedError``, ``SessionExpiredError`` и ряда смежных — один цикл **recovery**: сброс клиента, при файловой сессии удаление ``*.session``, повторное ``connect()`` и **одна** повторная попытка RPC.
+
+Интерактивный первый вход (код SMS / 2FA) по-прежнему выполняется **вне** HTTP-приложения; после этого экспортируйте StringSession в ``TELEGRAM_SESSION`` или скопируйте ``.session`` в ``TELEGRAM_SESSION_DIR``.
+
 ## Публичный API класса сервиса
 
 | Метод | Назначение |
@@ -81,7 +95,8 @@ async def search_channels(q: str, telegram: TelethonUserSessionServiceDep):
 | `is_configured()` | Есть ли `api_id` / `api_hash` в настройках |
 | `connected` | Подключён ли сокет клиента |
 | `connect()` / `disconnect()` | Явное управление клиентом |
-| `startup_for_fastapi()` | Мягкий старт без исключений наружу (лог + bool) |
+| `ensure_session_for_api()` | Перед Telegram RPC: подключение / смена ``TELEGRAM_SESSION`` / готовность клиента |
+| `startup_for_fastapi()` | Мягкий старт без исключений наружу (лог + кортеж ``(ok, reason)``) |
 | `search_public_channels(query, limit=15, broadcast_only=True)` | Поиск, DTO **`TelegramSearchHit`** |
 | `resolve_channel(identifier)` | Строка (`@username`, `t.me/...`) или числовой peer → **`Channel`** |
 | `get_channel_info(identifier)` | **`TelegramChannelFullInfo`** (about, participants_count при наличии) |

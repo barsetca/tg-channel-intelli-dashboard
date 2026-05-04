@@ -7,9 +7,11 @@ from app.api.v1.endpoints import (
     compare,
     export_data,
     health,
+    orchestration_jobs,
     recommendations,
     search_channels,
     semantic_search,
+    telegram_auth,
 )
 
 api_router = APIRouter()
@@ -32,3 +34,5 @@ api_router.include_router(
 )
 api_router.include_router(compare.router, prefix="/channels", tags=["compare"])
 api_router.include_router(export_data.router, prefix="/export", tags=["export"])
+api_router.include_router(telegram_auth.router, prefix="/telegram", tags=["telegram-auth"])
+api_router.include_router(orchestration_jobs.router, prefix="/orchestration", tags=["orchestration"])

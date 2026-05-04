@@ -33,7 +33,9 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 | Метод | Путь | Сценарий (см. `context/user_scenario.txt`) |
 |-------|------|---------------------------------------------|
-| POST | `/search-channels` | 1 — поиск по каталогу в БД; 8 — `manual_review` при слишком общем запросе |
+| POST | `/search-channels` | 1 — поиск: `search_source` = `saved_catalog` (SQLite) или `telegram_live` (фоновый job); 8 — `manual_review`; ответ может содержать `background_job` |
+| — | Оркестрация | `app/orchestration/coordinator.py` — очередь Telethon→SQLite→metrics→AI→vector (см. docstring модуля) |
+| POST | `/telegram/auth/start`, `/auth/code`, `/auth/password` | Первый вход Telethon из клиента приложения (телефон → код → 2FA); см. `docs/TELEGRAM_TELETHON.md` |
 | GET | `/channel/{id}` | 2 — карточка канала |
 | POST | `/channel/{id}/summarize` | 3 — сводка последних постов (LLM) |
 | POST | `/analyze/{id}` | 2 — запуск `ChannelAnalysisPipeline`, запись в `analyses` |
