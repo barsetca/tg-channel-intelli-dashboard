@@ -6,7 +6,7 @@ Pydantic-схемы для сценариев intelligence API (поиск, ан
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -21,12 +21,25 @@ class SearchChannelsRequest(BaseModel):
     """Тело запроса «Найти каналы» (форма из user_scenario)."""
 
     topic: str = Field(..., min_length=1, description="Тематика / сфера (обязательна)")
-    count: int = Field(20, ge=1, le=100, description="Сколько каналов вернуть")
+    count: int | None = Field(20, ge=1, description="Сколько каналов вернуть")
     min_subscribers: int | None = Field(None, ge=0, description="Мин. подписчиков")
     max_subscribers: int | None = Field(None, ge=0, description="Макс. подписчиков")
     channel_type: Literal["new_only", "all"] = Field("all", description="Только новые или все")
     language: str | None = Field(None, max_length=32, description="Язык (подсказка)")
     region_country: str | None = Field(None, max_length=128, description="Регион / страна")
+    username_query: str | None = Field(
+        None,
+        max_length=255,
+        description="Поиск по username канала",
+    )
+    last_post_from: date | None = Field(
+        None,
+        description="Дата последнего поста: от (saved_catalog)",
+    )
+    last_post_to: date | None = Field(
+        None,
+        description="Дата последнего поста: до (saved_catalog)",
+    )
     extra_conditions: str | None = Field(
         None,
         max_length=2000,
@@ -34,7 +47,18 @@ class SearchChannelsRequest(BaseModel):
     )
     search_source: Literal["saved_catalog", "telegram_live"] = Field(
         "saved_catalog",
-        description="Где искать: локальный каталог (SQLite) или живой Telegram (Telethon, фоновая задача)",
+        description=(
+            "Где искать: локальный каталог (SQLite) или живой Telegram "
+            "(Telethon, фоновая задача)"
+        ),
+    )
+    sort_by: Literal["subscriber_count", "last_sync_at"] = Field(
+        "subscriber_count",
+        description="Сортировка для saved_catalog",
+    )
+    sort_order: Literal["asc", "desc"] = Field(
+        "desc",
+        description="Направление сортировки для saved_catalog",
     )
 
     @model_validator(mode="after")
@@ -45,6 +69,21 @@ class SearchChannelsRequest(BaseModel):
             and self.max_subscribers < self.min_subscribers
         ):
             raise ValueError("max_subscribers не может быть меньше min_subscribers")
+        if self.search_source == "telegram_live":
+            if self.min_subscribers is not None or self.max_subscribers is not None:
+                raise ValueError("Для telegram_live фильтр по подписчикам отключён")
+            if self.last_post_from is not None or self.last_post_to is not None:
+                raise ValueError("Для telegram_live фильтр по дате поста отключён")
+            if self.count is None:
+                raise ValueError("Для telegram_live укажите count (1..30)")
+            if self.count < 1 or self.count > 30:
+                raise ValueError("Для telegram_live count должен быть в диапазоне 1..30")
+        if (
+            self.last_post_from is not None
+            and self.last_post_to is not None
+            and self.last_post_to < self.last_post_from
+        ):
+            raise ValueError("last_post_to не может быть раньше last_post_from")
         return self
 
 
@@ -81,7 +120,9 @@ class ChannelCard(BaseModel):
     subscriber_count: int | None = Field(None, description="Подписчики")
     posts_per_week_estimate: float | None = Field(None, description="Оценка постов/нед")
     last_post_at: datetime | None = Field(None, description="Последний пост")
+    last_sync_at: datetime | None = Field(None, description="Дата записи/обновления канала")
     primary_topic: str | None = Field(None, description="Тематика")
+    topic_search: str | None = Field(None, description="Исходный поисковый topic из Telegram формы")
     invite_slug: str | None = Field(None, description="Ссылка / slug")
     language_hint: str | None = None
     region_country: str | None = None
@@ -135,6 +176,100 @@ class AnalyzeChannelRequest(BaseModel):
     )
 
 
+class AnalyzeChannelByHandleRequest(BaseModel):
+    """Сценарий 2: запуск анализа по ссылке или username."""
+
+    channel_ref: str = Field(
+        ...,
+        min_length=2,
+        max_length=512,
+        description="Ссылка на канал (t.me/...) или username (@name)",
+    )
+    user_intent: str = Field(
+        "Проанализируй канал: тематика, стиль, риски и рекомендации для рекламодателя.",
+        max_length=4000,
+        description="Пользовательская формулировка задачи для LLM",
+    )
+    post_limit: int = Field(
+        10,
+        ge=3,
+        le=20,
+        description="Сколько последних постов подтянуть из Telegram перед анализом",
+    )
+
+
+class ContentStrategyReport(BaseModel):
+    """Выводы по позиционированию и контент-стратегии (для UI отчёта)."""
+
+    goals: str = ""
+    main_topics: str = ""
+    formats: str = ""
+    cadence: str = ""
+    rubricator: str = ""
+    target_audience: str = ""
+    seo_focus: str = ""
+    engagement: str = ""
+
+
+class ToneOfVoiceReport(BaseModel):
+    """Тональность и стиль (для UI отчёта)."""
+
+    style: str = ""
+    lexicon: str = ""
+    emotions: str = ""
+    distance: str = ""
+    consistency: str = ""
+    vs_positioning: str = ""
+
+
+class ChannelAnalysisReport(BaseModel):
+    """Пользовательский отчёт сценария 2 (агрегат из БД + pipeline result)."""
+
+    channel_description: str
+    topic: str
+    subscribers_count: int | None = None
+    report_created_at: datetime | None = None
+    publication_frequency: str
+    avg_post_length: int | None
+    posts_summary: str = Field(
+        "",
+        description="Краткое содержание проанализированных постов (из стадии summarization)",
+    )
+    content_strategy: ContentStrategyReport = Field(default_factory=ContentStrategyReport)
+    tone_of_voice: ToneOfVoiceReport = Field(default_factory=ToneOfVoiceReport)
+    strengths: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    recommendations: list[str] = Field(default_factory=list)
+
+
+class ChannelAnalysisHistoryItem(BaseModel):
+    """Строка списка сохранённых анализов."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    channel_id: int | None
+    channel_display_ref: str | None = None
+    status: str
+    analyzer_id: str
+    created_at: datetime
+
+
+class SavedChannelAnalysisDetail(BaseModel):
+    """Деталь сохранённого отчёта для повторного просмотра."""
+
+    analysis_id: int
+    channel_id: int
+    status: str
+    message: str
+    created_at: datetime
+    report: ChannelAnalysisReport | None = None
+    channel_display_ref: str | None = Field(
+        None,
+        description="Метка канала для UI: @username, ссылка или запасной идентификатор",
+    )
+
+
 class AnalyzeChannelResponse(BaseModel):
     """Идентификатор записи анализа и краткий статус."""
 
@@ -142,6 +277,12 @@ class AnalyzeChannelResponse(BaseModel):
     channel_id: int
     status: str = Field(..., description="completed | blocked_validation | failed")
     message: str = Field(..., description="Человекочитаемый итог")
+    manual_review: ManualReviewFlags | None = None
+    report: ChannelAnalysisReport | None = None
+    channel_display_ref: str | None = Field(
+        None,
+        description="Метка канала для UI: @username, ссылка или запасной идентификатор",
+    )
 
 
 class AnalysisRead(BaseModel):
@@ -163,15 +304,29 @@ class AnalysisRead(BaseModel):
 class SummarizePostsRequest(BaseModel):
     """Сценарий 3: сколько последних постов свернуть в summary."""
 
-    post_limit: int = Field(10, ge=1, le=100, description="Число последних постов")
+    post_limit: int = Field(10, ge=3, le=20, description="Число последних постов")
+
+
+class SummarizePostsByHandleRequest(BaseModel):
+    """Сценарий 3: запуск сводки по ссылке или username канала."""
+
+    channel_ref: str = Field(
+        ...,
+        min_length=2,
+        max_length=512,
+        description="Ссылка на канал (t.me/...) или username (@name)",
+    )
+    post_limit: int = Field(10, ge=3, le=20, description="Число последних постов")
 
 
 class SummarizePostsResponse(BaseModel):
     """Краткая сводка по постам."""
 
     channel_id: int
+    channel_display_ref: str | None = None
     posts_used: int
-    summary: str = Field(..., description="Ключевые темы и идеи (LLM)")
+    summary: str = Field(..., description="Ключевые темы и идеи по окну последних постов (LLM)")
+    per_post_summaries: list[str] = Field(default_factory=list, description="Краткие сводки по каждому посту")
     stored_analysis_hint: str | None = Field(
         None,
         description="Подсказка: summary можно писать в Analysis и векторный индекс",

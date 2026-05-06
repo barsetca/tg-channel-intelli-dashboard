@@ -15,6 +15,9 @@ services:
       dockerfile: Dockerfile
     env_file:
       - .env
+    environment:
+      # Внутри docker-сети API должен ходить в Qdrant по service DNS.
+      QDRANT_URL: http://qdrant:6333
     ports:
       - "8000:8000"
     volumes:

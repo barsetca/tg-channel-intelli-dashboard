@@ -16,7 +16,10 @@ from app.orchestration.coordinator import OrchestrationCoordinator
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    coordinator = OrchestrationCoordinator()
+    coordinator = OrchestrationCoordinator(
+        settings=settings,
+        get_telegram=lambda: getattr(app.state, "telegram_service", None),
+    )
     await coordinator.start()
     app.state.orchestration_coordinator = coordinator
     app.state.telegram_auth_flows = TelegramInteractiveAuthFlows()

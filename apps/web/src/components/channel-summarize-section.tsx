@@ -43,10 +43,10 @@ export function ChannelSummarizeSection({ channelId }: { channelId: number }) {
           <Input
             id="post_limit"
             type="number"
-            min={1}
-            max={50}
+            min={3}
+            max={20}
             value={limit}
-            onChange={(e) => setLimit(Number(e.target.value) || 1)}
+            onChange={(e) => setLimit(Math.max(3, Math.min(20, Number(e.target.value) || 5)))}
           />
         </div>
         <Button type="submit" disabled={loading}>

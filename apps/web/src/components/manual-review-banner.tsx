@@ -4,7 +4,7 @@ import { Alert } from "@/components/ui/alert";
 
 export function ManualReviewBanner({ flags }: { flags: ManualReviewFlags }) {
   return (
-    <Alert variant="warning" title="Manual review required">
+    <Alert variant="warning" title="Требуется ручная проверка">
       <div className="flex gap-3">
         <AlertTriangle className="mt-0.5 size-5 shrink-0 text-amber-600" />
         <div>

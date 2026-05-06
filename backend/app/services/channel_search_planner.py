@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 def _fallback_planner(user: dict[str, Any]) -> SearchPlannerOutput:
     topic = str(user.get("topic", "")).strip()
     return SearchPlannerOutput(
-        search_topic=topic or "telegram",
+        search_topic=topic or "channels",
         min_subscribers=user.get("min_subscribers"),
         max_subscribers=user.get("max_subscribers"),
         count=int(user.get("count", 20) or 20),
@@ -38,8 +38,14 @@ def merge_planner_with_user_request(user: dict[str, Any], planner: SearchPlanner
     Слияние: планировщик задаёт нишу и мягкие границы, форма пользователя — жёсткий потолок по count
     и пересечение диапазонов подписчиков.
     """
-    u_count = max(1, min(100, int(user.get("count", 20) or 20)))
-    count = max(1, min(u_count, planner.count, 100))
+    source = str(user.get("search_source") or "saved_catalog")
+    max_count = 30 if source == "telegram_live" else 10_000
+    user_count = user.get("count")
+    if user_count is None:
+        count = max(1, min(planner.count, max_count))
+    else:
+        u_count = max(1, min(max_count, int(user_count or 20)))
+        count = max(1, min(u_count, planner.count, max_count))
 
     topic = (planner.search_topic or "").strip() or str(user.get("topic", "")).strip()
 

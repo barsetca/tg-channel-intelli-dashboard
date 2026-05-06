@@ -1,8 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Clock, Database, Loader2, Plane, Search } from "lucide-react";
-import { ApiError, fetchOrchestrationJobStatus, fetchTelegramStatus, searchChannels } from "@/lib/api-client";
+import { Clock, Database, Loader2, Minimize2, Plane, Search, X } from "lucide-react";
+import {
+  ApiError,
+  cancelOrchestrationJob,
+  deleteChannel,
+  fetchOrchestrationJobStatus,
+  fetchTelegramStatus,
+  searchChannels,
+} from "@/lib/api-client";
 import type {
   BackgroundSearchJob,
   SearchChannelsRequest,
@@ -10,7 +17,6 @@ import type {
 } from "@/lib/types/api";
 import { ChannelSearchResultList } from "@/components/channel-search-result-list";
 import { ExportLinks } from "@/components/export-links";
-import { ManualReviewBanner } from "@/components/manual-review-banner";
 import { TelegramAuthDialog } from "@/components/telegram-auth-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
@@ -23,16 +29,24 @@ import { Badge } from "@/components/ui/badge";
 
 const selectClass =
   "w-full rounded-xl border border-zinc-300 bg-white px-3 py-2.5 text-sm text-zinc-900 outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-500/20";
+const LAST_SEARCH_CACHE_KEY = "tgci:last-search-page-state:v1";
+const DISMISSED_COMPLETED_JOB_KEY = "tgci:dismissed-completed-job-id:v1";
 
 export default function SearchPage() {
   const [searchSource, setSearchSource] = useState<"saved_catalog" | "telegram_live">("saved_catalog");
   const [topic, setTopic] = useState("investing & personal finance");
   const [count, setCount] = useState(15);
+  const [showAllSaved, setShowAllSaved] = useState(false);
   const [minSub, setMinSub] = useState<number | "">("");
   const [maxSub, setMaxSub] = useState<number | "">("");
   const [channelType, setChannelType] = useState<"new_only" | "all">("all");
+  const [sortBy, setSortBy] = useState<"subscriber_count" | "last_sync_at">("subscriber_count");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const [language, setLanguage] = useState("ru");
   const [region, setRegion] = useState("");
+  const [usernameQuery, setUsernameQuery] = useState("");
+  const [lastPostFrom, setLastPostFrom] = useState("");
+  const [lastPostTo, setLastPostTo] = useState("");
   const [extra, setExtra] = useState("");
 
   const [loading, setLoading] = useState(false);
@@ -40,14 +54,131 @@ export default function SearchPage() {
   const [data, setData] = useState<SearchChannelsResponse | null>(null);
   const [authOpen, setAuthOpen] = useState(false);
   const [trackedJob, setTrackedJob] = useState<BackgroundSearchJob | null>(null);
+  const [showNoResultsModal, setShowNoResultsModal] = useState(false);
+  const [showManualReviewModal, setShowManualReviewModal] = useState(false);
+  const [showJobModal, setShowJobModal] = useState(false);
+  const [jobModalMinimized, setJobModalMinimized] = useState(false);
 
   useEffect(() => {
-    if (data?.background_job) {
-      setTrackedJob(data.background_job);
-    } else {
-      setTrackedJob(null);
+    try {
+      const raw = window.sessionStorage.getItem(LAST_SEARCH_CACHE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as {
+        searchSource?: "saved_catalog" | "telegram_live";
+        topic?: string;
+        count?: number;
+        showAllSaved?: boolean;
+        minSub?: number | "";
+        maxSub?: number | "";
+        channelType?: "new_only" | "all";
+        sortBy?: "subscriber_count" | "last_sync_at";
+        sortOrder?: "asc" | "desc";
+        language?: string;
+        region?: string;
+        usernameQuery?: string;
+        lastPostFrom?: string;
+        lastPostTo?: string;
+        extra?: string;
+        data?: SearchChannelsResponse | null;
+        trackedJob?: BackgroundSearchJob | null;
+      };
+      if (parsed.searchSource) setSearchSource(parsed.searchSource);
+      if (typeof parsed.topic === "string") setTopic(parsed.topic);
+      if (typeof parsed.count === "number") setCount(parsed.count);
+      if (typeof parsed.showAllSaved === "boolean") setShowAllSaved(parsed.showAllSaved);
+      if (parsed.minSub === "" || typeof parsed.minSub === "number") setMinSub(parsed.minSub);
+      if (parsed.maxSub === "" || typeof parsed.maxSub === "number") setMaxSub(parsed.maxSub);
+      if (parsed.channelType) setChannelType(parsed.channelType);
+      if (parsed.sortBy) setSortBy(parsed.sortBy);
+      if (parsed.sortOrder) setSortOrder(parsed.sortOrder);
+      if (typeof parsed.language === "string") setLanguage(parsed.language);
+      if (typeof parsed.region === "string") setRegion(parsed.region);
+      if (typeof parsed.usernameQuery === "string") setUsernameQuery(parsed.usernameQuery);
+      if (typeof parsed.lastPostFrom === "string") setLastPostFrom(parsed.lastPostFrom);
+      if (typeof parsed.lastPostTo === "string") setLastPostTo(parsed.lastPostTo);
+      if (typeof parsed.extra === "string") setExtra(parsed.extra);
+      if (parsed.data) setData(parsed.data);
+      const dismissedJobId = window.sessionStorage.getItem(DISMISSED_COMPLETED_JOB_KEY);
+      if (parsed.trackedJob && parsed.trackedJob.job_id !== dismissedJobId) {
+        setTrackedJob(parsed.trackedJob);
+      }
+    } catch {
+      /* ignore cache parse issues */
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.sessionStorage.setItem(
+        LAST_SEARCH_CACHE_KEY,
+        JSON.stringify({
+          searchSource,
+          topic,
+          count,
+          showAllSaved,
+          minSub,
+          maxSub,
+          channelType,
+          sortBy,
+          sortOrder,
+          language,
+          region,
+          usernameQuery,
+          lastPostFrom,
+          lastPostTo,
+          extra,
+          data,
+          trackedJob,
+        }),
+      );
+    } catch {
+      /* ignore quota/private-mode errors */
+    }
+  }, [
+    searchSource,
+    topic,
+    count,
+    showAllSaved,
+    minSub,
+    maxSub,
+    channelType,
+    sortBy,
+    sortOrder,
+    language,
+    region,
+    usernameQuery,
+    lastPostFrom,
+    lastPostTo,
+    extra,
+    data,
+    trackedJob,
+  ]);
+
+  useEffect(() => {
+    const bgJob = data?.background_job;
+    if (bgJob) {
+      setTrackedJob((prev) => {
+        if (!prev) return bgJob;
+        if (prev.job_id !== bgJob.job_id) return bgJob;
+        return {
+          ...prev,
+          ...bgJob,
+        };
+      });
+      setShowJobModal(true);
+      setJobModalMinimized(false);
     }
   }, [data?.background_job]);
+
+  useEffect(() => {
+    if (!trackedJob) {
+      setShowJobModal(false);
+      return;
+    }
+    if (!jobModalMinimized) {
+      setShowJobModal(true);
+    }
+  }, [trackedJob, jobModalMinimized]);
 
   useEffect(() => {
     if (!trackedJob?.job_id) return;
@@ -68,6 +199,7 @@ export default function SearchPage() {
             stage: st.stage,
             stage_label: st.stage_label,
             updated_at: st.updated_at,
+            planner_output: st.planner_output ?? prev.planner_output,
           };
         });
       } catch (pollErr) {
@@ -94,23 +226,86 @@ export default function SearchPage() {
   }, [trackedJob?.job_id, trackedJob?.status]);
 
   const buildSearchBody = useCallback((): SearchChannelsRequest => {
+    const isSaved = searchSource === "saved_catalog";
     return {
       topic: topic.trim(),
-      count,
-      min_subscribers: minSub === "" ? null : minSub,
-      max_subscribers: maxSub === "" ? null : maxSub,
+      count: isSaved ? (showAllSaved ? null : count) : Math.max(1, Math.min(30, count)),
+      min_subscribers: isSaved ? (minSub === "" ? null : minSub) : null,
+      max_subscribers: isSaved ? (maxSub === "" ? null : maxSub) : null,
       channel_type: channelType,
+      sort_by: isSaved ? sortBy : "subscriber_count",
+      sort_order: isSaved ? sortOrder : "desc",
       language: language.trim() || null,
       region_country: region.trim() || null,
+      username_query: isSaved ? usernameQuery.trim() || null : null,
+      last_post_from: isSaved ? lastPostFrom || null : null,
+      last_post_to: isSaved ? lastPostTo || null : null,
       extra_conditions: extra.trim() || null,
       search_source: searchSource,
     };
-  }, [topic, count, minSub, maxSub, channelType, language, region, extra, searchSource]);
+  }, [
+    topic,
+    count,
+    showAllSaved,
+    minSub,
+    maxSub,
+    channelType,
+    sortBy,
+    sortOrder,
+    language,
+    region,
+    usernameQuery,
+    lastPostFrom,
+    lastPostTo,
+    extra,
+    searchSource,
+  ]);
 
   const runSearchRequest = useCallback(async () => {
     const res = await searchChannels(buildSearchBody());
     setData(res);
+    setShowManualReviewModal(Boolean(res.manual_review?.needs_review));
+    setShowNoResultsModal(
+      !res.channels.length && !res.manual_review?.needs_review && !res.background_job,
+    );
   }, [buildSearchBody]);
+
+  const closeCompletedJobModal = useCallback(() => {
+    if (trackedJob?.status === "completed" && trackedJob.job_id) {
+      window.sessionStorage.setItem(DISMISSED_COMPLETED_JOB_KEY, trackedJob.job_id);
+    }
+    setTrackedJob(null);
+    setData((prev) => (prev ? { ...prev, background_job: null } : prev));
+    setShowJobModal(false);
+    setJobModalMinimized(false);
+  }, [trackedJob]);
+
+  const handleCancelJob = useCallback(async () => {
+    if (!trackedJob?.job_id) return;
+    const ok = window.confirm(
+      "Отменить текущее фоновое задание? Прогресс может быть потерян.",
+    );
+    if (!ok) return;
+    try {
+      const st = await cancelOrchestrationJob(trackedJob.job_id);
+      setTrackedJob((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: st.status as BackgroundSearchJob["status"],
+              detail: st.detail,
+              stage: st.stage,
+              stage_label: st.stage_label,
+              updated_at: st.updated_at,
+            }
+          : prev,
+      );
+      setShowJobModal(false);
+      setJobModalMinimized(false);
+    } catch (err) {
+      setError(err instanceof ApiError ? `${err.status}: ${err.message}` : "Не удалось отменить задание");
+    }
+  }, [trackedJob]);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -161,7 +356,20 @@ export default function SearchPage() {
     }
   }, [runSearchRequest]);
 
-  const job = trackedJob ?? data?.background_job ?? null;
+  const onDeleteChannel = useCallback(
+    async (channelId: number) => {
+      if (!window.confirm("Удалить канал из сохраненного каталога?")) return;
+      try {
+        await deleteChannel(channelId);
+        await runSearchRequest();
+      } catch (err) {
+        setError(err instanceof ApiError ? `${err.status}: ${err.message}` : "Не удалось удалить канал");
+      }
+    },
+    [runSearchRequest],
+  );
+
+  const job = trackedJob;
   const jobActive = job && (job.status === "queued" || job.status === "running");
 
   return (
@@ -178,8 +386,8 @@ export default function SearchPage() {
           </div>
           <p className="max-w-sm text-center text-sm font-medium text-zinc-800">
             {searchSource === "telegram_live"
-              ? "Идёт запрос к API: поиск в Telegram или постановка фонового задания…"
-              : "Идёт поиск по каталогу…"}
+              ? "Выполняется поиск в Telegram и постановка фонового задания…"
+              : "Выполняется поиск по сохраненному каталогу…"}
           </p>
         </div>
       ) : null}
@@ -187,22 +395,21 @@ export default function SearchPage() {
       <TelegramAuthDialog open={authOpen} onClose={() => setAuthOpen(false)} onSuccess={handleAuthSuccess} />
 
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight text-zinc-900">Channel search</h1>
+        <h1 className="text-2xl font-semibold tracking-tight text-zinc-900">Поиск каналов</h1>
         <p className="mt-2 text-sm text-zinc-600">
-          Choose <strong className="font-medium text-zinc-800">saved catalog</strong> (SQLite) or{" "}
-          <strong className="font-medium text-zinc-800">Telegram (live)</strong>. Для live при отсутствии сессии
-          откроется окно входа; при готовой сессии показывается индикатор ожидания на время запроса.
+          Выберите <strong className="font-medium text-zinc-800">сохраненный каталог</strong> (SQLite) или{" "}
+          <strong className="font-medium text-zinc-800">Telegram (live)</strong>. Если сессии нет, откроется окно входа.
         </p>
       </div>
 
       <Card>
-        <CardTitle>Filters</CardTitle>
+        <CardTitle>Фильтры</CardTitle>
         <CardDescription>
-          Topic is required; Telegram live checks the server session first, then runs search or opens sign-in.
+          Тема обязательна. В режиме Telegram live сначала проверяется сессия на сервере.
         </CardDescription>
         <form onSubmit={onSubmit} className="mt-6 grid gap-4 sm:grid-cols-2">
           <div className="sm:col-span-2">
-            <Label>Search scope</Label>
+            <Label>Источник поиска</Label>
             <div className="mt-2 flex flex-wrap gap-3">
               <label className="flex cursor-pointer items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3 has-[:checked]:border-violet-400 has-[:checked]:bg-violet-50">
                 <input
@@ -213,7 +420,7 @@ export default function SearchPage() {
                   className="text-violet-600"
                 />
                 <Database className="size-4 text-violet-600" />
-                <span className="text-sm font-medium text-zinc-800">Saved catalog</span>
+                <span className="text-sm font-medium text-zinc-800">Сохраненный каталог</span>
               </label>
               <label className="flex cursor-pointer items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3 has-[:checked]:border-violet-400 has-[:checked]:bg-violet-50">
                 <input
@@ -229,70 +436,154 @@ export default function SearchPage() {
             </div>
           </div>
           <div className="sm:col-span-2">
-            <Label htmlFor="topic">Topic / niche</Label>
+            <Label htmlFor="topic">Тема / ниша</Label>
             <Input id="topic" value={topic} onChange={(e) => setTopic(e.target.value)} required />
           </div>
           <div>
-            <Label htmlFor="count">How many channels</Label>
-            <Input
-              id="count"
-              type="number"
-              min={1}
-              max={100}
-              value={count}
-              onChange={(e) => setCount(Number(e.target.value) || 1)}
-            />
+            <Label htmlFor="count">Сколько каналов</Label>
+            {searchSource === "saved_catalog" ? (
+              <div className="space-y-2">
+                <Input
+                  id="count"
+                  type="number"
+                  min={1}
+                  value={count}
+                  disabled={showAllSaved}
+                  onChange={(e) => setCount(Number(e.target.value) || 1)}
+                />
+                <label className="inline-flex items-center gap-2 text-sm text-zinc-700">
+                  <input
+                    type="checkbox"
+                    checked={showAllSaved}
+                    onChange={(e) => setShowAllSaved(e.target.checked)}
+                  />
+                  Показать все
+                </label>
+              </div>
+            ) : (
+              <Input
+                id="count"
+                type="number"
+                min={1}
+                max={30}
+                value={count}
+                onChange={(e) => setCount(Number(e.target.value) || 1)}
+              />
+            )}
           </div>
           <div>
-            <Label htmlFor="ctype">Channel type</Label>
+            <Label htmlFor="ctype">Тип каналов</Label>
             <select
               id="ctype"
               value={channelType}
               onChange={(e) => setChannelType(e.target.value as "new_only" | "all")}
               className={selectClass}
             >
-              <option value="all">All</option>
-              <option value="new_only">New only</option>
+              <option value="all">Все</option>
+              <option value="new_only">Показать последние</option>
             </select>
           </div>
+          {searchSource === "saved_catalog" ? (
+            <>
+              <div>
+                <Label htmlFor="sortBy">Сортировка</Label>
+                <select
+                  id="sortBy"
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value as "subscriber_count" | "last_sync_at")}
+                  className={selectClass}
+                >
+                  <option value="subscriber_count">Количество подписчиков</option>
+                  <option value="last_sync_at">Дата обновления</option>
+                </select>
+              </div>
+              <div>
+                <Label htmlFor="sortOrder">Порядок</Label>
+                <select
+                  id="sortOrder"
+                  value={sortOrder}
+                  onChange={(e) => setSortOrder(e.target.value as "asc" | "desc")}
+                  className={selectClass}
+                >
+                  <option value="desc">{sortBy === "last_sync_at" ? "Сначала последние" : "По убыванию"}</option>
+                  <option value="asc">{sortBy === "last_sync_at" ? "Сначала старые" : "По возрастанию"}</option>
+                </select>
+              </div>
+            </>
+          ) : null}
+          {searchSource === "saved_catalog" ? (
+            <>
+              <div>
+                <Label htmlFor="min">Подписчиков от</Label>
+                <Input
+                  id="min"
+                  type="number"
+                  min={0}
+                  placeholder="необязательно"
+                  value={minSub}
+                  onChange={(e) => setMinSub(e.target.value === "" ? "" : Number(e.target.value))}
+                />
+              </div>
+              <div>
+                <Label htmlFor="max">Подписчиков до</Label>
+                <Input
+                  id="max"
+                  type="number"
+                  min={0}
+                  placeholder="необязательно"
+                  value={maxSub}
+                  onChange={(e) => setMaxSub(e.target.value === "" ? "" : Number(e.target.value))}
+                />
+              </div>
+            </>
+          ) : null}
           <div>
-            <Label htmlFor="min">Min subscribers</Label>
-            <Input
-              id="min"
-              type="number"
-              min={0}
-              placeholder="optional"
-              value={minSub}
-              onChange={(e) => setMinSub(e.target.value === "" ? "" : Number(e.target.value))}
-            />
-          </div>
-          <div>
-            <Label htmlFor="max">Max subscribers</Label>
-            <Input
-              id="max"
-              type="number"
-              min={0}
-              placeholder="optional"
-              value={maxSub}
-              onChange={(e) => setMaxSub(e.target.value === "" ? "" : Number(e.target.value))}
-            />
-          </div>
-          <div>
-            <Label htmlFor="lang">Language</Label>
+            <Label htmlFor="lang">Язык</Label>
             <Input id="lang" placeholder="ru, en…" value={language} onChange={(e) => setLanguage(e.target.value)} />
           </div>
           <div>
-            <Label htmlFor="region">Region / country</Label>
-            <Input id="region" placeholder="optional" value={region} onChange={(e) => setRegion(e.target.value)} />
+            <Label htmlFor="region">Регион / страна</Label>
+            <Input id="region" placeholder="необязательно" value={region} onChange={(e) => setRegion(e.target.value)} />
           </div>
+          {searchSource === "saved_catalog" ? (
+            <div className="sm:col-span-2 grid gap-4 md:grid-cols-3">
+              <div>
+                <Label htmlFor="lastPostFrom">Последний пост от</Label>
+                <Input
+                  id="lastPostFrom"
+                  type="date"
+                  value={lastPostFrom}
+                  onChange={(e) => setLastPostFrom(e.target.value)}
+                />
+              </div>
+              <div>
+                <Label htmlFor="lastPostTo">Последний пост до</Label>
+                <Input
+                  id="lastPostTo"
+                  type="date"
+                  value={lastPostTo}
+                  onChange={(e) => setLastPostTo(e.target.value)}
+                />
+              </div>
+              <div>
+                <Label htmlFor="usernameQuery">Username канала</Label>
+                <Input
+                  id="usernameQuery"
+                  placeholder="@username или часть"
+                  value={usernameQuery}
+                  onChange={(e) => setUsernameQuery(e.target.value)}
+                />
+              </div>
+            </div>
+          ) : null}
           <div className="sm:col-span-2">
-            <Label htmlFor="extra">Extra conditions</Label>
-            <Textarea id="extra" placeholder="Free-text constraints for the planner…" value={extra} onChange={(e) => setExtra(e.target.value)} />
+            <Label htmlFor="extra">Дополнительные условия</Label>
+            <Textarea id="extra" placeholder="Свободный текст для планировщика…" value={extra} onChange={(e) => setExtra(e.target.value)} />
           </div>
           <div className="sm:col-span-2">
             <Button type="submit" disabled={loading} className="w-full sm:w-auto">
               {loading ? <Spinner /> : <Search className="size-4" />}
-              Find channels
+              Найти каналы
             </Button>
           </div>
         </form>
@@ -301,57 +592,95 @@ export default function SearchPage() {
       <ExportLinks />
 
       {error ? (
-        <Alert variant="error" title="Search failed">
+        <Alert variant="error" title="Ошибка поиска">
           {error}
         </Alert>
       ) : null}
 
-      {data?.manual_review?.needs_review ? <ManualReviewBanner flags={data.manual_review} /> : null}
+      {showManualReviewModal && data?.manual_review?.needs_review ? (
+        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/30 p-4">
+          <Card className="w-full max-w-lg">
+            <div className="flex items-start justify-between gap-3">
+              <CardTitle>Требуется ручная проверка</CardTitle>
+              <Button variant="ghost" onClick={() => setShowManualReviewModal(false)} aria-label="Закрыть">
+                <X className="size-4" />
+              </Button>
+            </div>
+            <p className="mt-2 text-sm text-zinc-700">{data.manual_review.reason}</p>
+            {data.manual_review.hints?.length ? (
+              <ul className="mt-3 list-inside list-disc space-y-1 text-sm text-zinc-700">
+                {data.manual_review.hints.map((h) => (
+                  <li key={h}>{h}</li>
+                ))}
+              </ul>
+            ) : null}
+          </Card>
+        </div>
+      ) : null}
 
-      {job ? (
-        <Card>
-          <CardTitle>Background job</CardTitle>
-          <CardDescription>
-            Конвейер обнаружения Telegram (оркестратор). Статус обновляется каждые ~1.5 с через{" "}
-            <code className="rounded bg-zinc-100 px-1 text-xs">GET /api/v1/orchestration/jobs/…</code>. В логах бэкенда
-            ищите префикс <code className="rounded bg-zinc-100 px-1 text-xs">orchestration.</code> (этапы{" "}
-            <code className="rounded bg-zinc-100 px-1 text-xs">job_dequeued</code>,{" "}
-            <code className="rounded bg-zinc-100 px-1 text-xs">stage_begin</code> /{" "}
-            <code className="rounded bg-zinc-100 px-1 text-xs">stage_end</code>).
-          </CardDescription>
-          <div className="mt-3 flex flex-wrap items-center gap-2 text-sm text-zinc-700">
-            {jobActive ? <Loader2 className="size-4 shrink-0 animate-spin text-violet-600" aria-hidden /> : null}
-            <Badge tone={job.status === "failed" ? "warning" : "violet"}>{job.status}</Badge>
-            <span className="font-mono text-xs text-zinc-600">{job.job_id}</span>
-          </div>
-          {job.stage_label ? (
-            <p className="mt-2 text-sm font-medium text-violet-900">Этап: {job.stage_label}</p>
-          ) : null}
-          {job.detail ? (
-            <p className="mt-2 whitespace-pre-wrap text-sm text-zinc-600">{job.detail}</p>
-          ) : null}
-          {job.updated_at ? (
-            <p className="mt-1 text-xs text-zinc-500">Обновлено: {new Date(job.updated_at).toLocaleString()}</p>
-          ) : null}
-          {jobActive ? (
+      {job && showJobModal && !jobModalMinimized ? (
+        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/30 p-4">
+          <Card className="w-full max-w-2xl">
+            <div className="flex items-start justify-between gap-3">
+              <CardTitle>Фоновая задача</CardTitle>
+              <div className="flex items-center gap-1">
+                {job.status === "completed" || job.status === "failed" ? (
+                  <Button variant="ghost" onClick={closeCompletedJobModal} aria-label="Закрыть">
+                    <X className="size-4" />
+                  </Button>
+                ) : (
+                  <>
+                    <Button
+                      variant="ghost"
+                      onClick={() => {
+                        setJobModalMinimized(true);
+                        setShowJobModal(false);
+                      }}
+                      aria-label="Свернуть"
+                    >
+                      <Minimize2 className="size-4" />
+                    </Button>
+                    <Button variant="ghost" onClick={handleCancelJob} aria-label="Отменить задание">
+                      <X className="size-4" />
+                    </Button>
+                  </>
+                )}
+              </div>
+            </div>
+            <CardDescription>
+              Поиск запущен. Статус:
+            </CardDescription>
+            <div className="mt-3 flex flex-wrap items-center gap-2 text-sm text-zinc-700">
+              {jobActive ? <Loader2 className="size-4 shrink-0 animate-spin text-violet-600" aria-hidden /> : null}
+              <Badge tone={job.status === "failed" ? "warning" : "violet"}>{job.status}</Badge>
+            </div>
+            {job.detail ? (
+              <p className="mt-2 whitespace-pre-wrap text-sm text-zinc-600">{job.detail}</p>
+            ) : null}
             <p className="mt-2 text-sm text-violet-800">
-              После завершения пайплайна каналы появятся в каталоге — затем снова запустите поиск в режиме «Saved
-              catalog».
+              После завершения пайплайна каналы появятся в каталоге — затем снова запустите поиск в режиме
+              «Сохраненный каталог».
             </p>
-          ) : null}
-          {job.status === "completed" ? (
-            <p className="mt-2 text-sm text-emerald-800">
-              Задание в памяти сервера завершено. Сейчас пайплайн — MVP-заглушки; реальный Telethon→SQLite подключается
-              в воркере по мере разработки.
-            </p>
-          ) : null}
-        </Card>
+          </Card>
+        </div>
+      ) : null}
+      {job && jobModalMinimized ? (
+        <Button
+          className="fixed bottom-6 right-6 z-20"
+          variant="secondary"
+          onClick={() => {
+            setShowJobModal(true);
+            setJobModalMinimized(false);
+          }}
+        >
+          Открыть статус задачи
+        </Button>
       ) : null}
 
       {data?.normalized_filters && Object.keys(data.normalized_filters).length > 0 ? (
         <Card>
-          <CardTitle>Normalized filters</CardTitle>
-          <CardDescription>What the planner resolved from your request.</CardDescription>
+          <CardTitle>Нормализованные фильтры</CardTitle>
+          <CardDescription>Что планировщик выделил из вашего запроса.</CardDescription>
           <pre className="mt-4 max-h-48 overflow-auto rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-xs text-zinc-600">
             {JSON.stringify(data.normalized_filters, null, 2)}
           </pre>
@@ -360,24 +689,32 @@ export default function SearchPage() {
 
       {data?.channels?.length ? (
         <div className="space-y-3">
-          <h2 className="text-lg font-medium text-zinc-900">Results ({data.channels.length})</h2>
-          <p className="text-sm text-zinc-600">Click a row to open the channel card.</p>
-          <ChannelSearchResultList channels={data.channels} />
+          <h2 className="text-lg font-medium text-zinc-900">Результаты ({data.channels.length})</h2>
+          <p className="text-sm text-zinc-600">Нажмите на строку, чтобы открыть карточку канала.</p>
+          <ChannelSearchResultList channels={data.channels} onDelete={onDeleteChannel} />
         </div>
       ) : null}
 
-      {data &&
-      !data.channels.length &&
-      !data.manual_review?.needs_review &&
-      !data.background_job &&
-      searchSource === "saved_catalog" ? (
-        <p className="text-sm text-zinc-500">No channels matched. Try broadening the topic or relaxing filters.</p>
+      {showNoResultsModal ? (
+        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/30 p-4">
+          <Card className="w-full max-w-lg">
+            <div className="flex items-start justify-between gap-3">
+              <CardTitle>Поиск завершён</CardTitle>
+              <Button variant="ghost" onClick={() => setShowNoResultsModal(false)} aria-label="Закрыть">
+                <X className="size-4" />
+              </Button>
+            </div>
+            <p className="mt-2 text-sm text-zinc-700">
+              Ничего не найдено. Попробуйте расширить тему или ослабить фильтры.
+            </p>
+          </Card>
+        </div>
       ) : null}
 
       {data?.background_job && !data.channels.length ? (
         <p className="text-sm text-zinc-600">
-          Channels will land in the saved catalog after the background pipeline finishes; run a{" "}
-          <strong>saved catalog</strong> search again to open cards from the list.
+          Каналы появятся в сохраненном каталоге после завершения фонового пайплайна; затем запустите поиск в режиме{" "}
+          <strong>Saved catalog</strong>.
         </p>
       ) : null}
     </div>

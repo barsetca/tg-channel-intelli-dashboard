@@ -37,6 +37,11 @@ export default async function ChannelPage({ params }: { params: Promise<{ id: st
 
   return (
     <div className="mx-auto max-w-4xl space-y-8">
+      <div>
+        <Link href="/search" className="inline-flex items-center gap-1 text-sm text-zinc-600 hover:text-zinc-900">
+          ← Вернуться к результатам поиска
+        </Link>
+      </div>
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-zinc-900">
@@ -60,7 +65,7 @@ export default async function ChannelPage({ params }: { params: Promise<{ id: st
               className="inline-flex items-center gap-2 rounded-xl border border-zinc-300 px-3 py-2 text-sm text-zinc-800 hover:border-violet-400 hover:bg-violet-50/50"
             >
               <ExternalLink className="size-4" />
-              Open in Telegram
+              Открыть в Telegram
             </a>
           ) : null}
           <Link
@@ -68,41 +73,48 @@ export default async function ChannelPage({ params }: { params: Promise<{ id: st
             className="inline-flex items-center gap-2 rounded-xl bg-violet-600 px-3 py-2 text-sm font-medium text-white hover:bg-violet-500"
           >
             <BarChart3 className="size-4" />
-            Analytics
+            Аналитика
+          </Link>
+          <Link
+            href={`/channel-analysis?channel_ref=${encodeURIComponent(channel.username ? `@${channel.username}` : String(channel.telegram_id))}`}
+            className="inline-flex items-center gap-2 rounded-xl border border-zinc-300 px-3 py-2 text-sm text-zinc-800 hover:border-violet-400 hover:bg-violet-50/50"
+          >
+            <Sparkles className="size-4" />
+            Анализировать канал
           </Link>
           <Link
             href={`/channels/${channel.id}/recommendations`}
             className="inline-flex items-center gap-2 rounded-xl border border-zinc-300 px-3 py-2 text-sm text-zinc-800 hover:border-violet-400 hover:bg-violet-50/50"
           >
             <Users className="size-4" />
-            Similar
+            Похожие
           </Link>
         </div>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
         <Card>
-          <CardTitle>Audience & cadence</CardTitle>
-          <CardDescription>Public metadata snapshot (Scenario 1 card fields).</CardDescription>
+          <CardTitle>Аудитория и активность</CardTitle>
+          <CardDescription>Публичные метаданные канала.</CardDescription>
           <dl className="mt-4 space-y-2 text-sm">
             <div className="flex justify-between gap-4 border-b border-zinc-200 py-2">
-              <dt className="text-zinc-500">Subscribers</dt>
+              <dt className="text-zinc-500">Подписчики</dt>
               <dd className="text-zinc-900">{channel.subscriber_count?.toLocaleString() ?? "—"}</dd>
             </div>
             <div className="flex justify-between gap-4 border-b border-zinc-200 py-2">
-              <dt className="text-zinc-500">Posts / week (est.)</dt>
+              <dt className="text-zinc-500">Постов в неделю (оценка)</dt>
               <dd className="text-zinc-900">{channel.posts_per_week_estimate?.toFixed(1) ?? "—"}</dd>
             </div>
             <div className="flex justify-between gap-4 border-b border-zinc-200 py-2">
-              <dt className="text-zinc-500">Last post</dt>
+              <dt className="text-zinc-500">Последний пост</dt>
               <dd className="text-zinc-900">{formatDate(channel.last_post_at)}</dd>
             </div>
             <div className="flex justify-between gap-4 border-b border-zinc-200 py-2">
-              <dt className="text-zinc-500">Last sync</dt>
+              <dt className="text-zinc-500">Последняя синхронизация</dt>
               <dd className="text-zinc-900">{formatDate(channel.last_sync_at)}</dd>
             </div>
             <div className="flex justify-between gap-4 py-2">
-              <dt className="text-zinc-500">Language / region</dt>
+              <dt className="text-zinc-500">Язык / регион</dt>
               <dd className="text-right text-zinc-900">
                 {[channel.language_hint, channel.region_country].filter(Boolean).join(" · ") || "—"}
               </dd>
@@ -110,14 +122,14 @@ export default async function ChannelPage({ params }: { params: Promise<{ id: st
           </dl>
         </Card>
         <Card>
-          <CardTitle>Description</CardTitle>
-          <CardDescription>Invite slug for deep links when present.</CardDescription>
+          <CardTitle>Описание</CardTitle>
+          <CardDescription>Публичная ссылка/slug, если сохранена.</CardDescription>
           <p className="mt-4 text-sm leading-relaxed text-zinc-700">
-            {channel.description ?? "No description stored yet."}
+            {channel.description ?? "Описание пока не сохранено."}
           </p>
           {channel.invite_slug ? (
             <p className="mt-3 text-xs text-zinc-500">
-              invite: <code className="text-zinc-700">{channel.invite_slug}</code>
+              ссылка: <code className="text-zinc-700">{channel.invite_slug}</code>
             </p>
           ) : null}
         </Card>
@@ -126,12 +138,15 @@ export default async function ChannelPage({ params }: { params: Promise<{ id: st
       <div className="flex items-start gap-3 rounded-xl border border-cyan-200 bg-cyan-50 p-4 text-sm text-cyan-950">
         <Sparkles className="mt-0.5 size-5 shrink-0 text-cyan-600" />
         <p>
-          Run <Link className="font-medium text-cyan-800 underline-offset-2 hover:underline" href={`/semantic-search`}>semantic search</Link>{" "}
-          scoped to this channel id to probe the post corpus, or open{" "}
-          <Link className="font-medium text-cyan-800 underline-offset-2 hover:underline" href={`/channels/${channel.id}/analytics`}>
-            analytics
+          Запустите{" "}
+          <Link className="font-medium text-cyan-800 underline-offset-2 hover:underline" href={`/semantic-search`}>
+            семантический поиск
           </Link>{" "}
-          for the full analysis workflow (Scenario 2).
+          с фильтром по этому channel id или откройте{" "}
+          <Link className="font-medium text-cyan-800 underline-offset-2 hover:underline" href={`/channels/${channel.id}/analytics`}>
+            аналитику
+          </Link>{" "}
+          для полного сценария анализа.
         </p>
       </div>
 

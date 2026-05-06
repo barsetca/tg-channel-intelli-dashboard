@@ -2,15 +2,20 @@
 
 export type SearchChannelsRequest = {
   topic: string;
-  count?: number;
+  count?: number | null;
   min_subscribers?: number | null;
   max_subscribers?: number | null;
   channel_type?: "new_only" | "all";
   language?: string | null;
   region_country?: string | null;
+  username_query?: string | null;
+  last_post_from?: string | null;
+  last_post_to?: string | null;
   extra_conditions?: string | null;
   /** Локальный каталог (SQLite) или фоновый поиск в Telegram (Telethon). */
   search_source?: "saved_catalog" | "telegram_live";
+  sort_by?: "subscriber_count" | "last_sync_at";
+  sort_order?: "asc" | "desc";
 };
 
 export type BackgroundSearchJob = {
@@ -22,6 +27,7 @@ export type BackgroundSearchJob = {
   stage?: string | null;
   stage_label?: string | null;
   updated_at?: string | null;
+  planner_output?: Record<string, unknown> | null;
 };
 
 /** GET /api/v1/orchestration/jobs/{job_id} */
@@ -32,6 +38,7 @@ export type OrchestrationJobStatus = {
   detail: string;
   stage: string | null;
   stage_label: string | null;
+  planner_output?: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 };
@@ -51,7 +58,9 @@ export type ChannelCard = {
   subscriber_count: number | null;
   posts_per_week_estimate: number | null;
   last_post_at: string | null;
+  last_sync_at: string | null;
   primary_topic: string | null;
+  topic_search: string | null;
   invite_slug: string | null;
   language_hint: string | null;
   region_country: string | null;
@@ -70,18 +79,89 @@ export type ChannelDetail = ChannelCard & {
   last_sync_at: string | null;
 };
 
+export type ContentStrategyReport = {
+  goals: string;
+  main_topics: string;
+  formats: string;
+  cadence: string;
+  rubricator: string;
+  target_audience: string;
+  seo_focus: string;
+  engagement: string;
+};
+
+export type ToneOfVoiceReport = {
+  style: string;
+  lexicon: string;
+  emotions: string;
+  distance: string;
+  consistency: string;
+  vs_positioning: string;
+};
+
+export type ChannelAnalysisReport = {
+  channel_description: string;
+  topic: string;
+  subscribers_count?: number | null;
+  report_created_at?: string | null;
+  publication_frequency: string;
+  avg_post_length: number | null;
+  posts_summary: string;
+  content_strategy: ContentStrategyReport;
+  tone_of_voice: ToneOfVoiceReport;
+  strengths: string[];
+  risks: string[];
+  recommendations: string[];
+};
+
 export type AnalyzeChannelResponse = {
   analysis_id: number;
   channel_id: number;
   status: string;
   message: string;
+  manual_review?: ManualReviewFlags | null;
+  report?: ChannelAnalysisReport | null;
+  /** @username, ссылка или запасной идентификатор с бэкенда */
+  channel_display_ref?: string | null;
+};
+
+export type ChannelAnalysisHistoryItem = {
+  id: number;
+  channel_id: number | null;
+  channel_display_ref?: string | null;
+  status: string;
+  analyzer_id: string;
+  created_at: string;
+};
+
+export type SavedChannelAnalysisDetail = {
+  analysis_id: number;
+  channel_id: number;
+  status: string;
+  message: string;
+  created_at: string;
+  report: ChannelAnalysisReport | null;
+  channel_display_ref?: string | null;
+};
+
+export type AnalyzeChannelByHandleRequest = {
+  channel_ref: string;
+  user_intent?: string;
+  post_limit?: number;
+};
+
+export type SummarizeChannelByHandleRequest = {
+  channel_ref: string;
+  post_limit?: number;
 };
 
 export type SummarizePostsRequest = { post_limit: number };
 export type SummarizePostsResponse = {
   channel_id: number;
+  channel_display_ref?: string | null;
   posts_used: number;
   summary: string;
+  per_post_summaries?: string[];
   stored_analysis_hint: string | null;
 };
 

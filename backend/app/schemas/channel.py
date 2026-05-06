@@ -16,3 +16,4 @@ class ChannelRead(BaseModel):
     username: str | None
     title: str | None
     description: str | None
+    topic_search: str | None = None

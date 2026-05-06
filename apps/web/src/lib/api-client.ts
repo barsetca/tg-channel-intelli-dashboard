@@ -4,6 +4,10 @@
 
 import type {
   AnalyzeChannelResponse,
+  ChannelAnalysisHistoryItem,
+  SavedChannelAnalysisDetail,
+  AnalyzeChannelByHandleRequest,
+  SummarizeChannelByHandleRequest,
   ChannelDetail,
   CompareChannelsRequest,
   CompareChannelsResponse,
@@ -58,6 +62,9 @@ async function jsonFetch<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new ApiError(res.status, msg || res.statusText);
   }
+  if (res.status === 204) {
+    return undefined as T;
+  }
   return res.json() as Promise<T>;
 }
 
@@ -105,6 +112,13 @@ export async function fetchOrchestrationJobStatus(jobId: string): Promise<Orches
   return jsonFetch<OrchestrationJobStatus>(`/api/v1/orchestration/jobs/${encodeURIComponent(jobId)}`);
 }
 
+export async function cancelOrchestrationJob(jobId: string): Promise<OrchestrationJobStatus> {
+  return jsonFetch<OrchestrationJobStatus>(
+    `/api/v1/orchestration/jobs/${encodeURIComponent(jobId)}/cancel`,
+    { method: "POST" },
+  );
+}
+
 export async function getChannel(channelId: number): Promise<ChannelDetail> {
   return jsonFetch<ChannelDetail>(`/api/v1/channel/${channelId}`);
 }
@@ -119,11 +133,44 @@ export async function analyzeChannel(
   });
 }
 
+export async function analyzeChannelByHandle(
+  body: AnalyzeChannelByHandleRequest,
+): Promise<AnalyzeChannelResponse> {
+  return jsonFetch<AnalyzeChannelResponse>("/api/v1/analyze/by-handle", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function listChannelAnalyses(channelId?: number): Promise<ChannelAnalysisHistoryItem[]> {
+  const q = channelId != null ? `?channel_id=${encodeURIComponent(String(channelId))}` : "";
+  return jsonFetch<ChannelAnalysisHistoryItem[]>(`/api/v1/analyses${q}`);
+}
+
+export async function getSavedChannelAnalysis(analysisId: number): Promise<SavedChannelAnalysisDetail> {
+  return jsonFetch<SavedChannelAnalysisDetail>(`/api/v1/analyses/${analysisId}`);
+}
+
+export async function deleteChannelAnalysis(analysisId: number): Promise<void> {
+  await jsonFetch<void>(`/api/v1/analyses/${encodeURIComponent(String(analysisId))}`, {
+    method: "DELETE",
+  });
+}
+
 export async function summarizeChannel(
   channelId: number,
   body: SummarizePostsRequest,
 ): Promise<SummarizePostsResponse> {
   return jsonFetch<SummarizePostsResponse>(`/api/v1/channel/${channelId}/summarize`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function summarizeChannelByHandle(
+  body: SummarizeChannelByHandleRequest,
+): Promise<SummarizePostsResponse> {
+  return jsonFetch<SummarizePostsResponse>("/api/v1/analyze/by-handle/summarize", {
     method: "POST",
     body: JSON.stringify(body),
   });
@@ -149,6 +196,10 @@ export async function compareChannels(body: CompareChannelsRequest): Promise<Com
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+export async function deleteChannel(channelId: number): Promise<void> {
+  await jsonFetch<void>(`/api/v1/channels/${channelId}`, { method: "DELETE" });
 }
 
 export function exportChannelsUrl(format: "json" | "csv"): string {

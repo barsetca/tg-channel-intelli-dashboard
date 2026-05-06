@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
     analyze,
+    channel_analyses,
     channel_one,
     channels,
     compare,
@@ -26,6 +27,7 @@ api_router.include_router(channels.router, prefix="/channels", tags=["channels"]
 api_router.include_router(search_channels.router, prefix="/search-channels", tags=["search"])
 api_router.include_router(channel_one.router, prefix="/channel", tags=["channel"])
 api_router.include_router(analyze.router, prefix="/analyze", tags=["analyze"])
+api_router.include_router(channel_analyses.router, prefix="/analyses", tags=["analyze"])
 api_router.include_router(semantic_search.router, prefix="/semantic-search", tags=["semantic"])
 api_router.include_router(
     recommendations.router,

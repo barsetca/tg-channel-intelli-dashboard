@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { analyzeChannel, ApiError } from "@/lib/api-client";
-import type { ChannelDetail } from "@/lib/types/api";
+import type { AnalyzeChannelResponse, ChannelDetail } from "@/lib/types/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
@@ -11,14 +11,13 @@ import { Spinner } from "@/components/ui/spinner";
 import { Alert } from "@/components/ui/alert";
 import { ActivityBars } from "@/components/charts/activity-bars";
 import { TrendArea } from "@/components/charts/trend-area";
+import { AnalysisReportView } from "@/components/channel-analysis-report-view";
 
 export function ChannelAnalyzePanel({ channel }: { channel: ChannelDetail }) {
   const [intent, setIntent] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ analysis_id: number; status: string; message: string } | null>(
-    null,
-  );
+  const [result, setResult] = useState<AnalyzeChannelResponse | null>(null);
 
   const stubBars = useMemo(
     () => [
@@ -86,6 +85,7 @@ export function ChannelAnalyzePanel({ channel }: { channel: ChannelDetail }) {
               <span className="text-zinc-500">· Status:</span> {result.status}
             </p>
             <p className="mt-2 text-zinc-700">{result.message}</p>
+            {result.report ? <AnalysisReportView report={result.report} /> : null}
           </div>
         ) : null}
       </Card>

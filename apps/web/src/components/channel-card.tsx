@@ -49,6 +49,12 @@ export function ChannelCard({ channel }: { channel: ChannelCardType }) {
         <Link href={`${href}/analytics`} className="text-sm text-zinc-500 hover:text-zinc-800">
           Analytics
         </Link>
+        <Link
+          href={`/channel-analysis?channel_ref=${encodeURIComponent(channel.username ? `@${channel.username}` : String(channel.telegram_id))}`}
+          className="text-sm text-zinc-500 hover:text-zinc-800"
+        >
+          Analyze
+        </Link>
         <Link href={`${href}/recommendations`} className="text-sm text-zinc-500 hover:text-zinc-800">
           Recommendations
         </Link>

@@ -6,6 +6,7 @@ import {
   BarChart3,
   Home,
   Layers,
+  LineChart,
   Search,
   Sparkles,
 } from "lucide-react";
@@ -13,6 +14,7 @@ import {
 const nav = [
   { href: "/", label: "Home", icon: Home },
   { href: "/search", label: "Search", icon: Search },
+  { href: "/channel-analysis", label: "Анализ канала", icon: LineChart },
   { href: "/semantic-search", label: "Semantic", icon: Layers },
   { href: "/compare", label: "Compare", icon: BarChart3 },
 ];
@@ -57,9 +59,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <Link href="/" className="font-semibold text-zinc-900">
                 TG Intel
               </Link>
-              <div className="flex gap-2 text-xs">
+              <div className="flex flex-wrap gap-2 text-xs">
                 <Link href="/search" className="font-medium text-violet-700">
                   Search
+                </Link>
+                <Link href="/channel-analysis" className="font-medium text-violet-700">
+                  Анализ
                 </Link>
                 <Link href="/semantic-search" className="text-zinc-600">
                   Semantic

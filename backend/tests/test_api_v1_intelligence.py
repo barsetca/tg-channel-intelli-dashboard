@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from app.api.deps import get_intelligence_service, get_vector_service
 from app.main import app
 from app.schemas.intelligence import (
+    AnalyzeChannelResponse,
     ManualReviewFlags,
     SearchChannelsRequest,
     SearchChannelsResponse,
@@ -49,6 +50,35 @@ class _StubIntelligenceService:
         user_intent: str,
     ) -> tuple[Any, str | None]:
         return None, "not_found"
+
+    async def run_channel_analysis_by_handle(self, body: Any) -> AnalyzeChannelResponse:
+        return AnalyzeChannelResponse(
+            analysis_id=1,
+            channel_id=1,
+            status="completed",
+            message="ok",
+        )
+
+    async def summarize_recent_posts_by_handle(self, body: Any):
+        from app.schemas.intelligence import SummarizePostsResponse
+
+        return SummarizePostsResponse(
+            channel_id=1,
+            channel_display_ref="@sample_channel",
+            posts_used=body.post_limit,
+            summary="stub",
+            per_post_summaries=[],
+            stored_analysis_hint="saved",
+        )
+
+    async def list_channel_analysis_history(self, channel_id: Any = None, limit: int = 50) -> list[Any]:
+        return []
+
+    async def get_saved_channel_analysis(self, analysis_id: int) -> tuple[Any, str | None]:
+        return None, "not_found"
+
+    async def delete_channel_analysis(self, analysis_id: int) -> tuple[bool, str | None]:
+        return False, "not_found"
 
     async def summarize_recent_posts(
         self,
@@ -140,6 +170,42 @@ def test_analyze_not_found(client: TestClient) -> None:
     assert r.status_code == 404
 
 
+def test_analyze_by_handle_ok(client: TestClient) -> None:
+    r = client.post(
+        "/api/v1/analyze/by-handle",
+        json={"channel_ref": "@sample_channel", "user_intent": "test", "post_limit": 10},
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "completed"
+
+
+def test_summarize_by_handle_ok(client: TestClient) -> None:
+    r = client.post(
+        "/api/v1/analyze/by-handle/summarize",
+        json={"channel_ref": "@sample_channel", "post_limit": 5},
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["channel_id"] == 1
+
+
+def test_analyses_list_ok(client: TestClient) -> None:
+    r = client.get("/api/v1/analyses")
+    assert r.status_code == 200
+    assert r.json() == []
+
+
+def test_analyses_detail_not_found(client: TestClient) -> None:
+    r = client.get("/api/v1/analyses/99999")
+    assert r.status_code == 404
+
+
+def test_analyses_delete_not_found(client: TestClient) -> None:
+    r = client.delete("/api/v1/analyses/99999")
+    assert r.status_code == 404
+
+
 def test_compare_not_found(client: TestClient) -> None:
     r = client.post("/api/v1/channels/compare", json={"channel_ids": [1, 2]})
     assert r.status_code == 404
@@ -201,11 +267,18 @@ def test_openapi_contains_routes() -> None:
     with TestClient(app) as c:
         spec = c.get("/openapi.json").json()
     paths = spec.get("paths", {})
+    analyses_paths = paths.get("/api/v1/analyses/{analysis_id}", {})
+    assert "get" in analyses_paths and "delete" in analyses_paths
     assert "/api/v1/search-channels" in paths
     assert "/api/v1/channel/{channel_id}" in paths
     assert "/api/v1/analyze/{channel_id}" in paths
+    assert "/api/v1/analyze/by-handle" in paths
+    assert "/api/v1/analyze/by-handle/summarize" in paths
+    assert "/api/v1/analyses" in paths
+    assert "/api/v1/analyses/{analysis_id}" in paths
     assert "/api/v1/semantic-search" in paths
     assert "/api/v1/recommendations/{channel_id}" in paths
     assert "/api/v1/telegram/auth/start" in paths
     assert "/api/v1/telegram/status" in paths
     assert "/api/v1/orchestration/jobs/{job_id}" in paths
+    assert "/api/v1/channels/{channel_id}" in paths
