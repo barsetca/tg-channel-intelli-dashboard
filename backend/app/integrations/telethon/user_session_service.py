@@ -239,9 +239,26 @@ class TelethonUserSessionService:
             raise TelegramTelethonError("Telegram клиент недоступен. Проверьте lifespan приложения или connect().")
         return self._client
 
-    async def _guarded_call(self, label: str, factory: Callable[[], T | Awaitable[T]]) -> T:
+    async def _guarded_call(
+        self,
+        label: str,
+        factory: Callable[[], T | Awaitable[T]],
+        *,
+        max_additional_attempts: int | None = None,
+        cap_sleep_seconds: int | None = None,
+    ) -> T:
         """Перед RPC: ``ensure_session_for_api``; FloodWait-ретраи; одна попытка восстановления при «битой» сессии."""
         await self.ensure_session_for_api()
+        retry_attempts = (
+            max(0, max_additional_attempts)
+            if max_additional_attempts is not None
+            else max(0, self._settings.telegram_flood_retry_attempts)
+        )
+        retry_cap_seconds = (
+            max(1, cap_sleep_seconds)
+            if cap_sleep_seconds is not None
+            else max(1, self._settings.telegram_flood_max_wait_seconds)
+        )
 
         async def op_wrapper() -> T:
             maybe = factory()
@@ -252,8 +269,8 @@ class TelethonUserSessionService:
         try:
             return await run_with_optional_flood_retry(
                 op_wrapper,
-                max_additional_attempts=max(0, self._settings.telegram_flood_retry_attempts),
-                cap_sleep_seconds=max(1, self._settings.telegram_flood_max_wait_seconds),
+                max_additional_attempts=retry_attempts,
+                cap_sleep_seconds=retry_cap_seconds,
                 operation_label=label,
             )
         except BaseException as exc:
@@ -263,8 +280,8 @@ class TelethonUserSessionService:
                 await self.ensure_session_for_api()
                 return await run_with_optional_flood_retry(
                     op_wrapper,
-                    max_additional_attempts=max(0, self._settings.telegram_flood_retry_attempts),
-                    cap_sleep_seconds=max(1, self._settings.telegram_flood_max_wait_seconds),
+                    max_additional_attempts=retry_attempts,
+                    cap_sleep_seconds=retry_cap_seconds,
                     operation_label=f"{label} (after session recovery)",
                 )
             raise
@@ -286,7 +303,8 @@ class TelethonUserSessionService:
         if not q:
             raise TelegramInvalidIdentifierError("Пустой текст поиска Telegram.")
 
-        capped = max(1, min(limit, 50))
+        # MTProto `contacts.Search` обычно допускает до ~100 результатов за один запрос.
+        capped = max(1, min(limit, 100))
 
         async def _search_rpc():
             cli = self._ensure_client_ready()
@@ -330,6 +348,8 @@ class TelethonUserSessionService:
             ent = await self._guarded_call(
                 "get_entity",
                 lambda: self._ensure_client_ready().get_entity(handle),
+                max_additional_attempts=0,
+                cap_sleep_seconds=2,
             )
         except RPCError as exc:
             mapped = map_telethon_error(exc)
@@ -340,8 +360,10 @@ class TelethonUserSessionService:
             raise TelegramInvalidIdentifierError(str(exc)) from exc
 
         if isinstance(ent, Channel):
-            if getattr(ent, "left", False):
-                raise TelegramPrivateChannelError("Канал отмечен как left/private для этой сессии.")
+            # `left=True` не всегда означает приватность: публичный канал с username может быть
+            # доступен без вступления. Блокируем только явно недоступные сущности без username.
+            if getattr(ent, "left", False) and not getattr(ent, "username", None):
+                raise TelegramPrivateChannelError("Канал недоступен для этой сессии (left/private, без публичного username).")
             return ent
 
         raise TelegramInvalidIdentifierError(

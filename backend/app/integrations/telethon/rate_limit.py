@@ -43,6 +43,9 @@ async def run_with_optional_flood_retry(
             if not isinstance(mapped, TelegramRateLimitedError):
                 raise
             last_error = mapped
+            # If no retry budget remains, fail fast instead of sleeping pointlessly.
+            if attempt + 1 >= limit:
+                break
             wait_sec = mapped.retry_after_seconds
             if wait_sec is None or wait_sec <= 0:
                 wait_sec = 1.0

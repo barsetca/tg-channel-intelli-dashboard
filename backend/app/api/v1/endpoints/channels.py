@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.api.deps import get_channel_service
 from app.schemas.channel import ChannelCreate, ChannelRead
@@ -22,3 +22,13 @@ async def create_channel(
     service: ChannelService = Depends(get_channel_service),
 ) -> ChannelRead:
     return await service.create_or_get(body)
+
+
+@router.delete("/{channel_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_channel(
+    channel_id: int,
+    service: ChannelService = Depends(get_channel_service),
+) -> None:
+    ok = await service.delete_channel(channel_id)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Канал не найден")

@@ -28,3 +28,11 @@ class ChannelService:
     async def list_channels(self, limit: int = 50, offset: int = 0) -> list[ChannelRead]:
         rows = await self._channels.list_all(limit=limit, offset=offset)
         return [ChannelRead.model_validate(r) for r in rows]
+
+    async def delete_channel(self, channel_id: int) -> bool:
+        row = await self._channels.get_by_id(channel_id)
+        if row is None:
+            return False
+        await self._channels.delete(row)
+        await self._session.commit()
+        return True

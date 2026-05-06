@@ -40,11 +40,13 @@ def get_intelligence_service(
 ) -> IntelligenceService:
     """Сервис сценариев intelligence (поиск, анализ, сравнение, экспорт)."""
     coordinator = getattr(request.app.state, "orchestration_coordinator", None)
+    telegram = getattr(request.app.state, "telegram_service", None)
     telethon_ok = getattr(request.app.state, "telegram_service", None) is not None
     telethon_startup_failure = getattr(request.app.state, "telegram_startup_failure", None)
     return IntelligenceService(
         session,
         coordinator=coordinator,
+        telegram=telegram,
         telethon_live_available=telethon_ok,
         telethon_startup_failure=telethon_startup_failure,
     )

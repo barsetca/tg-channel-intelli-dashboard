@@ -74,6 +74,17 @@ class FakeResolveClient:
         return object()
 
 
+class FakeResolveLeftPublicClient:
+    def is_connected(self) -> bool:
+        return True
+
+    async def get_entity(self, handle):
+        _ = handle
+        ch = _channel(cid=42, username="public_channel")
+        ch.left = True
+        return ch
+
+
 def test_msg_to_brief_normalizes_naive_datetime() -> None:
     naive = datetime(2024, 1, 2, 3, 4, 5)
     msg = Message(
@@ -121,6 +132,22 @@ async def test_resolve_channel_raises_if_not_channel() -> None:
 
     with pytest.raises(TelegramInvalidIdentifierError):
         await svc.resolve_channel("@some")
+
+
+@pytest.mark.asyncio
+async def test_resolve_channel_allows_left_public_username() -> None:
+    svc = TelethonUserSessionService(settings=_test_settings())
+
+    async def guarded(label: str, factory):
+        maybe = factory()
+        return await maybe
+
+    svc._guarded_call = guarded  # type: ignore[method-assign]
+    svc._client = FakeResolveLeftPublicClient()
+
+    ch = await svc.resolve_channel("@public_channel")
+    assert isinstance(ch, Channel)
+    assert ch.username == "public_channel"
 
 
 @pytest.mark.asyncio
