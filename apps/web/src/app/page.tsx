@@ -1,30 +1,36 @@
 import Link from "next/link";
-import { BarChart3, HeartPulse, Layers, Search, Sparkles } from "lucide-react";
+import { BarChart3, HeartPulse, Layers, LineChart, Search, Sparkles } from "lucide-react";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 
 const tiles = [
   {
     href: "/search",
-    title: "Channel search",
-    desc: "Scenario 1 — saved catalog vs Telegram, manual review, export.",
+    title: "Поиск каналов",
+    desc: "Сценарий 1: поиск по сохраненному каталогу и Telegram с фильтрами.",
     icon: Search,
   },
   {
+    href: "/channel-analysis",
+    title: "Анализ канала",
+    desc: "Сценарий 2 и 3: полный анализ канала и резюмирование последних постов.",
+    icon: LineChart,
+  },
+  {
     href: "/semantic-search",
-    title: "Semantic search",
-    desc: "Scenario 4 — ask the corpus, inspect hits.",
+    title: "Семантический поиск",
+    desc: "Сценарий 4: поиск по накопленным данным и ответы с источниками.",
     icon: Layers,
   },
   {
     href: "/compare",
-    title: "Compare",
-    desc: "Scenario 5 — 2–5 channels, chart + table.",
+    title: "Сравнение каналов",
+    desc: "Сценарий 5: сравнение нескольких каналов по ключевым метрикам.",
     icon: BarChart3,
   },
   {
     href: "/health",
-    title: "API health",
-    desc: "Verify FastAPI connectivity and environment.",
+    title: "Состояние API",
+    desc: "Проверка доступности сервера и режима работы.",
     icon: HeartPulse,
   },
 ];
@@ -39,13 +45,7 @@ export default function Home() {
         <div>
           <h1 className="text-3xl font-semibold tracking-tight text-zinc-900">Telegram Channel Intelligence</h1>
           <p className="mt-3 max-w-2xl text-sm leading-relaxed text-zinc-600">
-            Operational dashboard for the scenarios in the product brief: discovery, deep analysis, summaries, semantic
-            retrieval, pairwise comparison, similar channels, export, and validation gates.
-          </p>
-          <p className="mt-3 text-xs text-zinc-500">
-            Point the app at your API with <code className="rounded bg-zinc-100 px-1 text-zinc-700">NEXT_PUBLIC_API_BASE_URL</code>{" "}
-            (browser) and optionally <code className="rounded bg-zinc-100 px-1 text-zinc-700">API_URL</code> for server-side
-            fetches.
+            Операционная панель для поиска каналов, анализа контента, сводок постов, семантического поиска и сравнения.
           </p>
         </div>
       </div>
@@ -65,15 +65,6 @@ export default function Home() {
           </Link>
         ))}
       </div>
-
-      <Card>
-        <CardTitle>Open a channel by id</CardTitle>
-        <CardDescription>
-          After search returns rows, use <span className="font-mono text-zinc-600">/channels/&lt;id&gt;</span> for the
-          profile, <span className="font-mono text-zinc-600">/analytics</span> for Scenario 2, and{" "}
-          <span className="font-mono text-zinc-600">/recommendations</span> for Scenario 6.
-        </CardDescription>
-      </Card>
     </div>
   );
 }

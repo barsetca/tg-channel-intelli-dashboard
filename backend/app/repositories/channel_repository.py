@@ -180,6 +180,7 @@ class ChannelRepository(BaseRepository[Channel]):
         *,
         topic: str,
         limit: int | None,
+        offset: int = 0,
         min_subscribers: int | None = None,
         max_subscribers: int | None = None,
         language: str | None = None,
@@ -196,8 +197,10 @@ class ChannelRepository(BaseRepository[Channel]):
         Тематика — по полям title / description / primary_topic / topics_json (текстовый CAST).
         Несколько фрагментов объединяются через OR (полнота выдачи по нише).
         """
+        normalized_topic = topic.strip().lower()
+        all_topics_mode = normalized_topic in {"*", "__all__", "___all___", "all", "все темы"}
         frags = catalog_search_like_fragments(topic)
-        if not frags:
+        if not frags and not all_topics_mode:
             return []
         if new_only:
             sort_by = "last_sync_at"
@@ -212,6 +215,13 @@ class ChannelRepository(BaseRepository[Channel]):
             last_post_at_gte=last_post_at_gte,
             last_post_at_lte=last_post_at_lte,
         )
+        if all_topics_mode:
+            stmt = base.order_by(*ordering)
+            if offset > 0:
+                stmt = stmt.offset(offset)
+            if limit is not None:
+                stmt = stmt.limit(limit)
+            return list((await self._session.execute(stmt)).scalars().all())
         # Приоритет: сначала точечное поле topic_search, затем расширенные текстовые поля.
         primary_patterns = [
             f"%{f.strip().replace('%', '').replace('_', '')}%"
@@ -220,11 +230,12 @@ class ChannelRepository(BaseRepository[Channel]):
         ]
         primary_match = or_(*(Channel.topic_search.ilike(p) for p in primary_patterns))
         primary_stmt = base.where(primary_match).order_by(*ordering)
-        if limit is not None:
-            primary_stmt = primary_stmt.limit(limit)
+        slice_end = (offset + limit) if limit is not None else None
+        if slice_end is not None:
+            primary_stmt = primary_stmt.limit(slice_end)
         primary_rows = list((await self._session.execute(primary_stmt)).scalars().all())
-        if limit is not None and len(primary_rows) >= limit:
-            return primary_rows[:limit]
+        if slice_end is not None and len(primary_rows) >= slice_end:
+            return primary_rows[offset:slice_end]
 
         matched_ids = {r.id for r in primary_rows}
         secondary_match = or_(*(_catalog_fields_ilike(f) for f in frags))
@@ -232,10 +243,13 @@ class ChannelRepository(BaseRepository[Channel]):
         if matched_ids:
             secondary_stmt = secondary_stmt.where(Channel.id.not_in(matched_ids))
         secondary_stmt = secondary_stmt.order_by(*ordering)
-        if limit is not None:
-            secondary_stmt = secondary_stmt.limit(max(0, limit - len(primary_rows)))
+        if slice_end is not None:
+            secondary_stmt = secondary_stmt.limit(max(0, slice_end - len(primary_rows)))
         secondary_rows = list((await self._session.execute(secondary_stmt)).scalars().all())
-        return primary_rows + secondary_rows
+        merged_rows = primary_rows + secondary_rows
+        if slice_end is None:
+            return merged_rows
+        return merged_rows[offset:slice_end]
 
     async def existing_telegram_ids_among(self, telegram_ids: Sequence[int]) -> set[int]:
         """Множество telegram_id, которые уже есть в каталоге (для new_only)."""
@@ -246,6 +260,16 @@ class ChannelRepository(BaseRepository[Channel]):
             select(Channel.telegram_id).where(Channel.telegram_id.in_(ids))
         )
         return {int(x) for x in result.scalars().all()}
+
+    async def list_excluding_for_similarity(self, exclude_id: int, limit: int = 500) -> list[Channel]:
+        """Кандидаты для грубого текстового fallback (сценарий 6)."""
+        result = await self._session.execute(
+            select(Channel)
+            .where(Channel.id != int(exclude_id))
+            .order_by(desc(Channel.subscriber_count).nulls_last(), desc(Channel.id))
+            .limit(limit)
+        )
+        return list(result.scalars().all())
 
     async def upsert_discovery_channel(
         self,

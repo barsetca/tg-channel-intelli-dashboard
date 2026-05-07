@@ -12,11 +12,11 @@ import {
 } from "lucide-react";
 
 const nav = [
-  { href: "/", label: "Home", icon: Home },
-  { href: "/search", label: "Search", icon: Search },
+  { href: "/", label: "Главная", icon: Home },
+  { href: "/search", label: "Поиск каналов", icon: Search },
   { href: "/channel-analysis", label: "Анализ канала", icon: LineChart },
-  { href: "/semantic-search", label: "Semantic", icon: Layers },
-  { href: "/compare", label: "Compare", icon: BarChart3 },
+  { href: "/semantic-search", label: "Семантический поиск", icon: Layers },
+  { href: "/compare", label: "Сравнение", icon: BarChart3 },
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -49,9 +49,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               );
             })}
           </nav>
-          <div className="mt-auto border-t border-zinc-200 pt-4 text-xs text-zinc-500">
-            Set <code className="rounded bg-zinc-100 px-1 text-zinc-700">NEXT_PUBLIC_API_BASE_URL</code> for API.
-          </div>
         </aside>
         <div className="flex min-w-0 flex-1 flex-col">
           <header className="sticky top-0 z-10 border-b border-zinc-200 bg-white/90 px-4 py-3 shadow-sm backdrop-blur md:hidden">
@@ -61,13 +58,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </Link>
               <div className="flex flex-wrap gap-2 text-xs">
                 <Link href="/search" className="font-medium text-violet-700">
-                  Search
+                  Поиск
                 </Link>
                 <Link href="/channel-analysis" className="font-medium text-violet-700">
                   Анализ
                 </Link>
                 <Link href="/semantic-search" className="text-zinc-600">
-                  Semantic
+                  Семантика
                 </Link>
               </div>
             </div>

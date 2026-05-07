@@ -22,6 +22,7 @@ class SearchChannelsRequest(BaseModel):
 
     topic: str = Field(..., min_length=1, description="Тематика / сфера (обязательна)")
     count: int | None = Field(20, ge=1, description="Сколько каналов вернуть")
+    offset: int = Field(0, ge=0, description="Смещение для постраничной выдачи")
     min_subscribers: int | None = Field(None, ge=0, description="Мин. подписчиков")
     max_subscribers: int | None = Field(None, ge=0, description="Макс. подписчиков")
     channel_type: Literal["new_only", "all"] = Field("all", description="Только новые или все")
@@ -143,6 +144,10 @@ class SearchChannelsResponse(BaseModel):
     background_job: BackgroundSearchJob | None = Field(
         None,
         description="При search_source=telegram_live — фоновое задание Telethon→SQLite→…",
+    )
+    has_more: bool = Field(
+        False,
+        description="Есть ли следующая страница результатов для saved_catalog",
     )
 
 
@@ -337,17 +342,13 @@ class SummarizePostsResponse(BaseModel):
 
 
 class SemanticSearchRequest(BaseModel):
-    """Семантический вопрос по корпусу (Qdrant + payload)."""
+    """Семантический запрос сценария 4 по накопленным post/window данным."""
 
-    query: str = Field(..., min_length=2, max_length=2000)
-    limit: int = Field(15, ge=1, le=50)
-    content_type: Literal["post", "summary", "profile"] | None = Field(
+    query: str = Field(..., min_length=2, max_length=2000, description="Вопрос в свободной форме")
+    limit: int = Field(12, ge=1, le=30, description="Сколько итоговых результатов показать")
+    channel_username: str | None = Field(
         None,
-        description="Ограничить тип документа в индексе",
-    )
-    channel_id: int | None = Field(
-        None,
-        description="Ограничить поиск одним каналом (FK в payload)",
+        description="Ограничить поиск одним каналом по username (без @)",
     )
 
 
@@ -357,48 +358,91 @@ class SemanticSearchHit(BaseModel):
     point_id: str
     score: float | None = Field(None, description="Релевантность (Qdrant score)")
     channel_id: int | None = None
+    channel_username: str | None = None
     post_id: int | None = None
+    published_at: datetime | None = None
+    source_url: str | None = None
     content_type: str | None = None
     text_preview: str | None = Field(None, description="Начало текста чанка")
 
 
-class SemanticSearchResponse(BaseModel):
-    """Сценарий 4: top-k + место под LLM synthesis (пока без второго LLM-вызова в MVP)."""
+class SemanticSource(BaseModel):
+    channel_username: str | None = None
+    message_id: int | None = None
+    source_url: str | None = None
+    score: float | None = None
+    summary: str | None = None
 
+
+class SemanticResultItem(BaseModel):
+    channel_username: str | None = None
+    title: str | None = None
+    relevance_reason: str | None = None
+    source_url: str | None = None
+    score: float | None = None
+
+
+class SemanticSearchResponse(BaseModel):
+    """Сценарий 4: unified JSON-ответ с обязательным `needs_review`."""
+
+    needs_review: bool = False
+    reason: str | None = None
     query: str
-    hits: list[SemanticSearchHit]
-    synthesis_placeholder: str | None = Field(
-        None,
-        description="Зарезервировано под ответ LLM по сниппетам (RAG synthesis)",
-    )
+    mode: Literal["post_search", "channel_search", "question_answering_over_posts"] | None = None
+    answer: str | None = None
+    results: list[SemanticResultItem] = Field(default_factory=list)
+    sources: list[SemanticSource] = Field(default_factory=list)
+    hits: list[SemanticSearchHit] = Field(default_factory=list)
+    synthesis_placeholder: str | None = None
 
 
 # --- Сценарий 6: похожие каналы ---
 
 
-class SimilarChannelItem(BaseModel):
-    """Канал-кандидат с оценкой близости."""
+class SimilarChannelSignals(BaseModel):
+    topic_overlap: float = Field(ge=0.0, le=1.0)
+    style_similarity: float = Field(ge=0.0, le=1.0)
+    frequency_similarity: float = Field(ge=0.0, le=1.0)
 
+
+class SimilarChannelItem(BaseModel):
     channel_id: int
-    score: float | None = Field(None, description="Агрегированная близость по чанкам")
+    channel_username: str | None = None
     title: str | None = None
-    username: str | None = None
+    score: float = Field(ge=0.0, le=1.0)
+    reasons: list[str] = Field(default_factory=list)
+    supporting_topics: list[str] = Field(default_factory=list)
+    supporting_signals: SimilarChannelSignals
+    missing_data: list[str] = Field(
+        default_factory=list,
+        description="Чего не хватает по этому каналу для «полного» семантического матча",
+    )
+
+
+class SimilarSourceChannel(BaseModel):
+    channel_id: int
+    channel_username: str | None = None
 
 
 class SimilarChannelsResponse(BaseModel):
-    """Список похожих каналов (агрегация по post hits из Qdrant)."""
-
-    seed_channel_id: int
-    similar: list[SimilarChannelItem]
+    needs_review: bool = False
+    reason: str | None = None
+    mode: Literal["similar_channels"] | None = None
+    source_channel: SimilarSourceChannel | None = None
+    results: list[SimilarChannelItem] = Field(default_factory=list)
+    quality_notes: list[str] = Field(
+        default_factory=list,
+        description="Пояснения о качестве подборки (деградация, неполные данные)",
+    )
 
 
 # --- Сценарий 5: сравнение ---
 
 
 class CompareChannelsRequest(BaseModel):
-    """2–5 каналов для сравнительной таблицы."""
+    """2–3 канала для сравнительной таблицы."""
 
-    channel_ids: list[int] = Field(..., min_length=2, max_length=5)
+    channel_ids: list[int] = Field(..., min_length=2, max_length=3)
 
     @model_validator(mode="after")
     def unique_channel_ids(self) -> Self:
@@ -418,14 +462,45 @@ class CompareChannelRow(BaseModel):
     primary_topic: str | None
 
 
+class CompareChannelMetrics(BaseModel):
+    """Расчётные метрики по сопоставимому окну (30 дней)."""
+
+    posts_in_window: int
+    posting_frequency_per_week: float
+    avg_views: float
+    median_views: float
+    p75_views: float
+    avg_forwards: float
+    er_forward_rate_mean: float
+    er_forward_rate_p75: float
+    weekly_stability_score: float = Field(ge=0.0, le=100.0)
+    views_trend_slope: float
+    tone_label: str
+    topic_labels: list[str] = Field(default_factory=list)
+    commercial_intent_share: float = Field(ge=0.0, le=1.0)
+    normalized_score: float = Field(ge=0.0, le=100.0)
+
+
+class CompareChannelInsight(BaseModel):
+    channel_id: int
+    username: str | None = None
+    strengths: list[str] = Field(default_factory=list)
+    recommendations: list[str] = Field(default_factory=list)
+    evidence_urls: list[str] = Field(default_factory=list)
+    metrics: CompareChannelMetrics
+
+
 class CompareChannelsResponse(BaseModel):
-    """Сценарий 5: метрики рядом; narrative — опционально через LLM позже."""
+    """Сценарий 5: полноценное сравнительное досье по окну 30 дней."""
 
     rows: list[CompareChannelRow]
     comparison_notes: str | None = Field(
         None,
         description="Краткие выводы (MVP: шаблон; можно заменить на LLM)",
     )
+    comparison_window_days: int = 30
+    generated_at: datetime | None = None
+    insights: list[CompareChannelInsight] = Field(default_factory=list)
 
 
 # --- Сценарий 7: экспорт (формат задаётся query-параметром `format=json|csv`) ---

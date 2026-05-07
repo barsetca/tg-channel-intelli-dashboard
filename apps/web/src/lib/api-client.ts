@@ -185,7 +185,7 @@ export async function semanticSearch(body: SemanticSearchRequest): Promise<Seman
 
 export async function getRecommendations(
   channelId: number,
-  limit = 10,
+  limit = 5,
 ): Promise<SimilarChannelsResponse> {
   const q = new URLSearchParams({ limit: String(limit) });
   return jsonFetch<SimilarChannelsResponse>(`/api/v1/recommendations/${channelId}?${q}`);

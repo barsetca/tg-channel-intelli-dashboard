@@ -14,6 +14,7 @@ from qdrant_client.models import (
     MatchValue,
     PayloadSchemaType,
     PointStruct,
+    Record,
     ScoredPoint,
     VectorParams,
 )
@@ -43,6 +44,17 @@ class QdrantStore:
     @property
     def collection_name(self) -> str:
         return self._collection
+
+    async def collection_exists(self, collection_name: str) -> bool:
+        return await self._client.collection_exists(collection_name)
+
+    async def collection_points_count(self, collection_name: str) -> int | None:
+        try:
+            info = await self._client.get_collection(collection_name)
+        except Exception:
+            return None
+        count = getattr(info, "points_count", None)
+        return int(count) if count is not None else None
 
     async def ensure_collection(self, vector_size: int) -> None:
         exists = await self._client.collection_exists(self._collection)
@@ -122,6 +134,40 @@ class QdrantStore:
             with_payload=True,
         )
         return list(res.points)
+
+    async def search_in_collection(
+        self,
+        *,
+        collection_name: str,
+        query_vector: list[float],
+        limit: int,
+        query_filter: Filter | None = None,
+    ) -> list[ScoredPoint]:
+        res = await self._client.query_points(
+            collection_name=collection_name,
+            query=query_vector,
+            query_filter=query_filter,
+            limit=limit,
+            with_payload=True,
+        )
+        return list(res.points)
+
+    async def scroll_in_collection(
+        self,
+        *,
+        collection_name: str,
+        limit: int,
+        query_filter: Filter | None = None,
+        with_vectors: bool = False,
+    ) -> list[Record]:
+        points, _ = await self._client.scroll(
+            collection_name=collection_name,
+            scroll_filter=query_filter,
+            limit=limit,
+            with_payload=True,
+            with_vectors=with_vectors,
+        )
+        return list(points)
 
     async def retrieve_vector(self, point_id: str) -> list[float]:
         res = await self._client.retrieve(

@@ -14,12 +14,12 @@ router = APIRouter()
     "/{channel_id}",
     response_model=SimilarChannelsResponse,
     summary="Похожие каналы",
-    description="Профиль канала в embedding, поиск по постам, агрегация по channel_id.",
+    description="Сценарий 6: рекомендации до 5 похожих каналов с валидацией качества данных.",
     responses={404: {"description": "Канал не найден"}},
 )
 async def similar_channels(
     channel_id: int,
-    limit: int = Query(10, ge=1, le=50),
+    limit: int = Query(5, ge=1, le=5),
     svc: IntelligenceService = Depends(get_intelligence_service),
     vector: VectorService = Depends(get_vector_service),
 ) -> SimilarChannelsResponse:

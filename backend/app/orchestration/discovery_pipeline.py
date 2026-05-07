@@ -9,20 +9,27 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
+from qdrant_client.models import PayloadSchemaType
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.schemas.search_planner import SearchPlannerOutput
 from app.core.config import Settings
 from app.core.database import AsyncSessionLocal
+from app.integrations.openai_client import OpenAIClient
+from app.integrations.qdrant_client import QdrantStore
 from app.integrations.telethon import TelethonUserSessionService
 from app.integrations.telethon.dto import TelegramSearchHit
 from app.models.audit_run import AuditRun
 from app.models.audit_run_item import AuditRunItem
 from app.repositories.channel_repository import ChannelRepository
 from app.services.channel_search_planner import merge_planner_with_user_request, plan_channel_search
+
+PROFILE_COLLECTION = "telegram_channel_profiles"
 
 logger = logging.getLogger(__name__)
 
@@ -432,11 +439,92 @@ async def run_ai_stage(settings: Settings, job: Any) -> None:
 
 
 async def run_vector_stage(settings: Settings, job: Any) -> None:
-    _ = job
+    """
+    Индексация «лёгкого» профиля канала в Qdrant для сценария 6 (похожие каналы).
+
+    Берутся title/description/primary_topic/topic_search из SQLite сразу после discovery,
+    без обязательного сценария 3 — сводки постов по-прежнему улучшают точность, но не обязательны.
+    """
     if not settings.openai_api_key or not settings.qdrant_url:
         logger.info("discovery.vector skipped (no OpenAI/Qdrant config)")
         return
-    logger.info(
-        "discovery.vector skipped job_id=%s — индексация профилей каналов не подключена к этому пайплайну",
-        job.id,
-    )
+    ids: list[int] = job.transient.get("persisted_channel_ids") or []
+    if not ids:
+        return
+
+    openai = OpenAIClient()
+    qdr = QdrantStore(settings)
+    try:
+        texts: list[str] = []
+        metas: list[Any] = []
+        async with AsyncSessionLocal() as session:
+            repo = ChannelRepository(session)
+            for cid in ids:
+                ch = await repo.get_by_id(cid)
+                if ch is None:
+                    continue
+                blob = "\n".join(
+                    str(x).strip()
+                    for x in (ch.title, ch.description, ch.primary_topic, ch.topic_search)
+                    if x and str(x).strip()
+                )
+                if len(blob) < 8:
+                    continue
+                texts.append(blob[: settings.embedding_max_chunk_chars])
+                metas.append(ch)
+        if not texts:
+            logger.info("discovery.vector job_id=%s no profile text to embed", job.id)
+            return
+
+        vectors = await openai.embed_texts(texts)
+        dim = len(vectors[0])
+        await qdr.ensure_collection_named(PROFILE_COLLECTION, dim)
+        for field_name, field_type in (
+            ("channel_id", PayloadSchemaType.INTEGER),
+            ("entity_type", PayloadSchemaType.KEYWORD),
+            ("channel_username", PayloadSchemaType.KEYWORD),
+        ):
+            try:
+                await qdr.ensure_payload_index(
+                    collection_name=PROFILE_COLLECTION,
+                    field_name=field_name,
+                    field_type=field_type,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        point_ids: list[str] = []
+        out_vectors: list[list[float]] = []
+        payloads: list[dict[str, Any]] = []
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for ch, vec in zip(metas, vectors, strict=True):
+            pid = str(uuid5(NAMESPACE_URL, f"{PROFILE_COLLECTION}/v1|channel_id={ch.id}"))
+            point_ids.append(pid)
+            out_vectors.append(vec)
+            payloads.append(
+                {
+                    "entity_type": "channel_profile",
+                    "channel_id": int(ch.id),
+                    "channel_username": (ch.username or "").lstrip("@") or None,
+                    "language": ch.language_hint,
+                    "generated_at": now_iso,
+                    "profile_version": 1,
+                    "source": "discovery_pipeline",
+                }
+            )
+        await qdr.upsert_vectors_to(
+            collection_name=PROFILE_COLLECTION,
+            ids=point_ids,
+            vectors=out_vectors,
+            payloads=payloads,
+        )
+        logger.info(
+            "discovery.vector job_id=%s indexed_profiles=%s collection=%s",
+            job.id,
+            len(point_ids),
+            PROFILE_COLLECTION,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("discovery.vector job_id=%s failed: %s", job.id, exc)
+    finally:
+        await qdr.close()

@@ -3,6 +3,7 @@
 export type SearchChannelsRequest = {
   topic: string;
   count?: number | null;
+  offset?: number;
   min_subscribers?: number | null;
   max_subscribers?: number | null;
   channel_type?: "new_only" | "all";
@@ -71,6 +72,7 @@ export type SearchChannelsResponse = {
   manual_review: ManualReviewFlags | null;
   normalized_filters: Record<string, unknown>;
   background_job?: BackgroundSearchJob | null;
+  has_more?: boolean;
 };
 
 export type ChannelDetail = ChannelCard & {
@@ -168,35 +170,70 @@ export type SummarizePostsResponse = {
 export type SemanticSearchRequest = {
   query: string;
   limit?: number;
-  content_type?: "post" | "summary" | "profile" | null;
-  channel_id?: number | null;
+  channel_username?: string | null;
 };
 
 export type SemanticSearchHit = {
   point_id: string;
   score: number | null;
   channel_id: number | null;
+  channel_username: string | null;
   post_id: number | null;
+  published_at: string | null;
+  source_url: string | null;
   content_type: string | null;
   text_preview: string | null;
 };
 
 export type SemanticSearchResponse = {
+  needs_review: boolean;
+  reason: string | null;
   query: string;
+  mode: "post_search" | "channel_search" | "question_answering_over_posts" | null;
+  answer: string | null;
+  results: Array<{
+    channel_username: string | null;
+    title: string | null;
+    relevance_reason: string | null;
+    source_url: string | null;
+    score: number | null;
+  }>;
+  sources: Array<{
+    channel_username: string | null;
+    message_id: number | null;
+    source_url: string | null;
+    score: number | null;
+    summary: string | null;
+  }>;
   hits: SemanticSearchHit[];
   synthesis_placeholder: string | null;
 };
 
 export type SimilarChannelItem = {
   channel_id: number;
-  score: number | null;
+  channel_username: string | null;
   title: string | null;
-  username: string | null;
+  score: number;
+  reasons: string[];
+  supporting_topics: string[];
+  supporting_signals: {
+    topic_overlap: number;
+    style_similarity: number;
+    frequency_similarity: number;
+  };
+  missing_data: string[];
 };
 
 export type SimilarChannelsResponse = {
-  seed_channel_id: number;
-  similar: SimilarChannelItem[];
+  needs_review: boolean;
+  reason: string | null;
+  mode: "similar_channels" | null;
+  source_channel: {
+    channel_id: number;
+    channel_username: string | null;
+  } | null;
+  results: SimilarChannelItem[];
+  quality_notes: string[];
 };
 
 export type CompareChannelsRequest = { channel_ids: number[] };
@@ -213,6 +250,31 @@ export type CompareChannelRow = {
 export type CompareChannelsResponse = {
   rows: CompareChannelRow[];
   comparison_notes: string | null;
+  comparison_window_days: number;
+  generated_at: string | null;
+  insights: Array<{
+    channel_id: number;
+    username: string | null;
+    strengths: string[];
+    recommendations: string[];
+    evidence_urls: string[];
+    metrics: {
+      posts_in_window: number;
+      posting_frequency_per_week: number;
+      avg_views: number;
+      median_views: number;
+      p75_views: number;
+      avg_forwards: number;
+      er_forward_rate_mean: number;
+      er_forward_rate_p75: number;
+      weekly_stability_score: number;
+      views_trend_slope: number;
+      tone_label: string;
+      topic_labels: string[];
+      commercial_intent_share: number;
+      normalized_score: number;
+    };
+  }>;
 };
 
 export type HealthResponse = {

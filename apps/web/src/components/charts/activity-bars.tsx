@@ -4,6 +4,7 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  LabelList,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -31,7 +32,17 @@ export function ActivityBars({ data, title }: { data: Row[]; title?: string }) {
             }}
             labelStyle={{ color: "#18181b" }}
           />
-          <Bar dataKey="value" fill="#7c3aed" radius={[6, 6, 0, 0]} maxBarSize={48} />
+          <Bar dataKey="value" fill="#7c3aed" radius={[6, 6, 0, 0]} maxBarSize={48}>
+            <LabelList
+              dataKey="value"
+              position="top"
+              formatter={(label) => {
+                const value = typeof label === "number" ? label : Number(label);
+                return Number.isFinite(value) ? value.toFixed(1) : "—";
+              }}
+              style={{ fill: "#52525b", fontSize: 11 }}
+            />
+          </Bar>
         </BarChart>
       </ResponsiveContainer>
     </div>

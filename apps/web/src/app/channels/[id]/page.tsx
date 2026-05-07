@@ -18,8 +18,15 @@ function formatDate(iso: string | null) {
   }
 }
 
-export default async function ChannelPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function ChannelPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams?: Promise<{ from_similar?: string; seed_channel_id?: string }>;
+}) {
   const { id } = await params;
+  const sp = (await searchParams) ?? {};
   const numericId = Number(id);
   if (!Number.isFinite(numericId)) notFound();
 
@@ -34,12 +41,21 @@ export default async function ChannelPage({ params }: { params: Promise<{ id: st
   const handle = channel.username ? `@${channel.username}` : `id:${channel.id}`;
   const tgLink =
     channel.username != null ? `https://t.me/${channel.username.replace(/^@/, "")}` : null;
+  const fromSimilar = sp.from_similar === "1";
+  const seedChannelId = Number(sp.seed_channel_id);
+  const backToSimilarHref =
+    fromSimilar && Number.isFinite(seedChannelId) && seedChannelId > 0
+      ? `/channels/${seedChannelId}/recommendations`
+      : null;
 
   return (
     <div className="mx-auto max-w-4xl space-y-8">
       <div>
-        <Link href="/search" className="inline-flex items-center gap-1 text-sm text-zinc-600 hover:text-zinc-900">
-          ← Вернуться к результатам поиска
+        <Link
+          href={backToSimilarHref ?? "/search"}
+          className="inline-flex items-center gap-1 text-sm text-zinc-600 hover:text-zinc-900"
+        >
+          {backToSimilarHref ? "← Назад к списку похожих" : "← Вернуться к результатам поиска"}
         </Link>
       </div>
       <div className="flex flex-wrap items-start justify-between gap-4">
