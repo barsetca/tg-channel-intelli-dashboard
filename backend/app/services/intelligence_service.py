@@ -87,6 +87,7 @@ logger = logging.getLogger(__name__)
 _URL_RE = re.compile(r"https?://\S+")
 _HASHTAG_RE = re.compile(r"#([\w_]{2,64})", flags=re.UNICODE)
 _MENTION_RE = re.compile(r"@([\w_]{3,64})", flags=re.UNICODE)
+_DATE_LINE_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2}\]")
 
 
 @dataclass
@@ -388,8 +389,55 @@ class IntelligenceService:
                     has_more=False,
                 )
             live_payload = body.model_dump()
+            live_payload["count"] = max(1, min(15, int(body.count or 15)))
             live_payload["min_subscribers"] = None
             live_payload["max_subscribers"] = None
+            username_only = (body.username_query or "").strip()
+            if username_only:
+                username_ref = self._normalize_channel_ref(username_only)
+                topic_tokens = {t for t in re.findall(r"[\wа-яА-ЯёЁ]{3,}", body.topic.lower()) if len(t) >= 3}
+                try:
+                    assert self._telegram is not None
+                    info = await self._telegram.get_channel_info(username_ref)
+                except Exception as exc:  # noqa: BLE001
+                    return SearchChannelsResponse(
+                        channels=[],
+                        manual_review=ManualReviewFlags(
+                            needs_review=True,
+                            reason=f"Канал @{username_ref.lstrip('@')} недоступен или не найден: {exc}",
+                            hints=["Проверьте username и повторите поиск."],
+                        ),
+                        normalized_filters={**body.model_dump(mode="json"), "username_priority": True},
+                        background_job=None,
+                        has_more=False,
+                    )
+                profile_blob = f"{(info.title or '').lower()} {(info.about or '').lower()}"
+                profile_tokens = {t for t in re.findall(r"[\wа-яА-ЯёЁ]{3,}", profile_blob) if len(t) >= 3}
+                if topic_tokens and profile_tokens and not (topic_tokens & profile_tokens):
+                    return SearchChannelsResponse(
+                        channels=[],
+                        manual_review=ManualReviewFlags(
+                            needs_review=True,
+                            reason=(
+                                "Тематика найденного канала не соответствует запрошенной нише. "
+                                "Уточните тему или проверьте username."
+                            ),
+                            hints=["Измените тему/нишу или выберите другой username."],
+                        ),
+                        normalized_filters={**body.model_dump(mode="json"), "username_priority": True},
+                        background_job=None,
+                        has_more=False,
+                    )
+                live_payload["username_query"] = username_ref
+                live_payload["selected_channel_ids"] = []
+                live_payload["live_channel_mode"] = "new"
+                live_payload["channel_type"] = "all"
+                live_payload["count"] = 1
+                live_payload["language"] = body.language or "ru"
+                live_payload["region_country"] = None
+                live_payload["extra_conditions"] = None
+            if body.live_channel_mode == "saved" and body.selected_channel_ids:
+                live_payload["count"] = min(20, max(1, len(body.selected_channel_ids)))
             job_id = await self._coordinator.schedule_telegram_channel_discovery(
                 payload=live_payload,
             )
@@ -634,6 +682,7 @@ class IntelligenceService:
         *,
         channel_id: int,
         user_intent: str,
+        post_limit: int = 10,
     ) -> tuple[AnalyzeChannelResponse, None] | tuple[None, str]:
         """
         Сценарий 2: AI-анализ канала, результат в `Analysis`.
@@ -646,17 +695,66 @@ class IntelligenceService:
 
         label = channel_display_ref(ch)
 
+        target_posts = max(3, int(post_limit))
+        sample_limit = max(80, target_posts * 8)
         res_posts = await self._session.execute(
             select(Post)
             .where(Post.channel_id == channel_id)
             .order_by(Post.posted_at.desc())
-            .limit(50),
+            .limit(sample_limit),
         )
         posts = list(res_posts.scalars())
-        snippets: list[PostSnippet] = [
-            PostSnippet(ensure_utc_aware(p.posted_at), p.text or "", views=p.views_count)
-            for p in reversed(posts)
-        ]
+        if len(posts) == 0 and self._telegram is not None:
+            channel_ref = (ch.username or ch.invite_slug or str(ch.telegram_id or "")).strip()
+            try:
+                recent_posts = await self._telegram.fetch_recent_posts(channel_ref, limit=max(40, target_posts * 5))
+            except TelegramTelethonError:
+                recent_posts = []
+            if recent_posts:
+                sorted_posts = sorted(recent_posts, key=lambda p: ensure_utc_aware(p.date_utc))
+                for p in sorted_posts:
+                    raw = {"views": p.views, "forwards": p.forwards}
+                    existing_q = await self._session.execute(
+                        select(Post).where(
+                            Post.channel_id == ch.id,
+                            Post.telegram_message_id == p.telegram_message_id,
+                        )
+                    )
+                    existing = existing_q.scalar_one_or_none()
+                    if existing is None:
+                        self._session.add(
+                            Post(
+                                channel_id=ch.id,
+                                telegram_message_id=p.telegram_message_id,
+                                posted_at=ensure_utc_aware(p.date_utc),
+                                text=p.text,
+                                views_count=p.views,
+                                forwards_count=p.forwards,
+                                raw_payload_json=raw,
+                            )
+                        )
+                    else:
+                        existing.posted_at = ensure_utc_aware(p.date_utc)
+                        existing.text = p.text
+                        existing.views_count = p.views
+                        existing.forwards_count = p.forwards
+                        existing.raw_payload_json = raw
+                norm_dates = [ensure_utc_aware(p.date_utc) for p in sorted_posts]
+                last_dt = max(norm_dates)
+                first_dt = min(norm_dates)
+                ch.last_post_at = last_dt
+                span_days = max((last_dt - first_dt).total_seconds() / 86400.0, 0.25)
+                weeks = max(span_days / 7.0, 0.05)
+                ch.posts_per_week_estimate = round(len(sorted_posts) / weeks, 3)
+                await self._session.commit()
+                res_posts = await self._session.execute(
+                    select(Post)
+                    .where(Post.channel_id == channel_id)
+                    .order_by(Post.posted_at.desc())
+                    .limit(sample_limit),
+                )
+                posts = list(res_posts.scalars())
+        filtered_posts, snippets = self._prepare_db_posts_for_analysis(posts, target_count=target_posts)
 
         inp = ChannelPipelineInput(
             user_intent=user_intent,
@@ -664,7 +762,7 @@ class IntelligenceService:
             channel_username=ch.username,
             posts=snippets,
         )
-        input_refs: dict[str, Any] = {"post_count": len(snippets)}
+        input_refs: dict[str, Any] = {"post_count": len(snippets), "raw_post_count": len(posts)}
         if user_intent.strip():
             input_refs["user_intent"] = user_intent.strip()
         analysis = Analysis(
@@ -707,7 +805,7 @@ class IntelligenceService:
         ) else "failed"
         report = self._build_channel_analysis_report(
             channel=ch,
-            posts=posts,
+            posts=filtered_posts,
             result_json=analysis.result_json if isinstance(analysis.result_json, dict) else None,
             report_created_at=analysis.created_at,
         )
@@ -813,6 +911,8 @@ class IntelligenceService:
 
         if not posts_summary:
             posts_summary = "Недостаточно данных: сводка по постам не сформирована."
+        else:
+            posts_summary = self._compress_posts_summary(posts_summary)
 
         return ChannelAnalysisReport(
             channel_description=(channel.description or "Описание отсутствует").strip(),
@@ -849,7 +949,7 @@ class IntelligenceService:
         channel_ref = self._normalize_channel_ref(body.channel_ref)
         try:
             info = await self._telegram.get_channel_info(channel_ref)
-            recent_posts = await self._telegram.fetch_recent_posts(channel_ref, limit=body.post_limit)
+            recent_posts = await self._telegram.fetch_recent_posts(channel_ref, limit=max(80, body.post_limit * 5))
         except Exception as exc:  # noqa: BLE001
             reason = str(exc)
             if isinstance(exc, TelegramTelethonError):
@@ -920,6 +1020,7 @@ class IntelligenceService:
         result, err = await self.run_channel_analysis(
             channel_id=ch.id,
             user_intent=body.user_intent,
+            post_limit=body.post_limit,
         )
         if err is not None or result is None:
             return AnalyzeChannelResponse(
@@ -938,6 +1039,58 @@ class IntelligenceService:
         lower = t.lower()
         garbage = ("joined the channel", "left the channel", "бот", "реклама", "подписывайтесь")
         return not any(x in lower for x in garbage)
+
+    def _post_to_snippet(self, post: Post) -> PostSnippet | None:
+        text = " ".join((post.text or "").split())
+        if not text:
+            return None
+        return PostSnippet(ensure_utc_aware(post.posted_at), text, views=post.views_count)
+
+    def _prepare_db_posts_for_analysis(
+        self,
+        posts: list[Post],
+        *,
+        target_count: int,
+    ) -> tuple[list[Post], list[PostSnippet]]:
+        strict_pairs: list[tuple[Post, PostSnippet]] = []
+        fallback_pairs: list[tuple[Post, PostSnippet]] = []
+        for p in posts:
+            snippet = self._post_to_snippet(p)
+            if snippet is None:
+                continue
+            if self._is_relevant_post_text(snippet.text):
+                strict_pairs.append((p, snippet))
+            else:
+                fallback_pairs.append((p, snippet))
+            if len(strict_pairs) >= target_count:
+                break
+
+        selected_pairs = strict_pairs[:target_count]
+        if len(selected_pairs) < target_count:
+            selected_ids = {int(p.id) for p, _ in selected_pairs if getattr(p, "id", None) is not None}
+            for p, s in fallback_pairs:
+                pid = int(p.id) if getattr(p, "id", None) is not None else None
+                if pid is not None and pid in selected_ids:
+                    continue
+                selected_pairs.append((p, s))
+                if len(selected_pairs) >= target_count:
+                    break
+
+        selected_pairs = list(reversed(selected_pairs))
+        return [p for p, _ in selected_pairs], [s for _, s in selected_pairs]
+
+    def _compress_posts_summary(self, text: str, *, max_len: int = 900, max_lines: int = 8) -> str:
+        src = str(text or "").strip()
+        if not src:
+            return src
+        lines = [" ".join(x.split()) for x in src.splitlines()]
+        filtered = [x for x in lines if x and not _DATE_LINE_RE.match(x)]
+        if not filtered:
+            filtered = [x for x in lines if x]
+        brief = "\n".join(filtered[:max_lines]).strip()
+        if len(brief) > max_len:
+            brief = brief[: max_len - 1].rstrip() + "…"
+        return brief or src[:max_len]
 
     def _normalize_telethon_post(self, item: TelegramPostBrief) -> PostForAnalysis | None:
         text = (item.text or "").strip()

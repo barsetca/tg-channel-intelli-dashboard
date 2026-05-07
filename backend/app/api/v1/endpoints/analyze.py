@@ -71,7 +71,8 @@ async def analyze_channel(
     svc: IntelligenceService = Depends(get_intelligence_service),
 ) -> AnalyzeChannelResponse:
     intent = (body.user_intent if body else None) or _DEFAULT_ANALYZE_INTENT
-    result, err = await svc.run_channel_analysis(channel_id=channel_id, user_intent=intent)
+    post_limit = (body.post_limit if body else 10)
+    result, err = await svc.run_channel_analysis(channel_id=channel_id, user_intent=intent, post_limit=post_limit)
     if err == "not_found":
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Канал не найден")
     assert result is not None
