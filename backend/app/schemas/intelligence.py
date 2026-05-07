@@ -26,12 +26,21 @@ class SearchChannelsRequest(BaseModel):
     min_subscribers: int | None = Field(None, ge=0, description="Мин. подписчиков")
     max_subscribers: int | None = Field(None, ge=0, description="Макс. подписчиков")
     channel_type: Literal["new_only", "all"] = Field("all", description="Только новые или все")
+    live_channel_mode: Literal["new", "saved"] = Field(
+        "new",
+        description="Режим telegram_live: новые каналы или актуализация сохраненных",
+    )
     language: str | None = Field(None, max_length=32, description="Язык (подсказка)")
     region_country: str | None = Field(None, max_length=128, description="Регион / страна")
     username_query: str | None = Field(
         None,
         max_length=255,
         description="Поиск по username канала",
+    )
+    selected_channel_ids: list[int] = Field(
+        default_factory=list,
+        description="Явно выбранные каналы каталога для актуализации в telegram_live",
+        max_length=20,
     )
     last_post_from: date | None = Field(
         None,
@@ -76,9 +85,13 @@ class SearchChannelsRequest(BaseModel):
             if self.last_post_from is not None or self.last_post_to is not None:
                 raise ValueError("Для telegram_live фильтр по дате поста отключён")
             if self.count is None:
-                raise ValueError("Для telegram_live укажите count (1..30)")
-            if self.count < 1 or self.count > 30:
-                raise ValueError("Для telegram_live count должен быть в диапазоне 1..30")
+                raise ValueError("Для telegram_live укажите count (1..15)")
+            if self.count < 1 or self.count > 15:
+                raise ValueError("Для telegram_live count должен быть в диапазоне 1..15")
+            if len(self.selected_channel_ids) > 20:
+                raise ValueError("Можно выбрать не более 20 сохранённых каналов")
+            if any(int(x) <= 0 for x in self.selected_channel_ids):
+                raise ValueError("selected_channel_ids должны содержать только положительные id")
         if (
             self.last_post_from is not None
             and self.last_post_to is not None
@@ -178,6 +191,12 @@ class AnalyzeChannelRequest(BaseModel):
         "Проанализируй канал: тематика, стиль, риски и рекомендации для рекламодателя.",
         max_length=4000,
         description="Пользовательская формулировка задачи для LLM",
+    )
+    post_limit: int = Field(
+        10,
+        ge=3,
+        le=20,
+        description="Сколько последних постов подтянуть из Telegram при пустой локальной истории",
     )
 
 

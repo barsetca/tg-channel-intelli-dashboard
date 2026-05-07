@@ -27,7 +27,7 @@ export function ChannelSummarizeSection({ channelId }: { channelId: number }) {
       setSummary(res.summary);
       setHint(res.stored_analysis_hint);
     } catch (err) {
-      setError(err instanceof ApiError ? `${err.status}: ${err.message}` : "Request failed");
+      setError(err instanceof ApiError ? `${err.status}: ${err.message}` : "Ошибка запроса");
     } finally {
       setLoading(false);
     }
@@ -35,11 +35,14 @@ export function ChannelSummarizeSection({ channelId }: { channelId: number }) {
 
   return (
     <Card>
-      <CardTitle>Recent posts summary</CardTitle>
-      <CardDescription>Scenario 3 — LLM digest of the latest posts.</CardDescription>
+      <CardTitle>Резюме последних постов</CardTitle>
+      <CardDescription>
+        Этот блок делает краткую сводку по последним постам канала: выделяет ключевые темы, смысловые акценты и общий
+        контекст публикаций.
+      </CardDescription>
       <form onSubmit={onSubmit} className="mt-4 space-y-4">
         <div>
-          <Label htmlFor="post_limit">Posts to include</Label>
+          <Label htmlFor="post_limit">Сколько постов включить в резюме</Label>
           <Input
             id="post_limit"
             type="number"
@@ -51,19 +54,19 @@ export function ChannelSummarizeSection({ channelId }: { channelId: number }) {
         </div>
         <Button type="submit" disabled={loading}>
           {loading ? <Spinner /> : null}
-          Generate summary
+          Сформировать резюме
         </Button>
       </form>
       {error ? (
         <div className="mt-4">
-          <Alert variant="error" title="Summary failed">
+          <Alert variant="error" title="Ошибка формирования резюме">
             {error}
           </Alert>
         </div>
       ) : null}
       {summary ? (
         <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 p-4">
-          <p className="text-sm leading-relaxed text-zinc-800 whitespace-pre-wrap">{summary}</p>
+          <p className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-800">{summary}</p>
           {hint ? <p className="mt-3 text-xs text-zinc-500">{hint}</p> : null}
         </div>
       ) : null}

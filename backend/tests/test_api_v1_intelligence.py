@@ -50,6 +50,7 @@ class _StubIntelligenceService:
         *,
         channel_id: int,
         user_intent: str,
+        post_limit: int = 10,
     ) -> tuple[Any, str | None]:
         return None, "not_found"
 

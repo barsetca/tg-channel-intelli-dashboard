@@ -16,15 +16,15 @@ async def run_summarization(
     plan: Plan,
     client: OpenAIStageClient,
     renderer: PromptRenderer,
-    max_words: int = 400,
+    max_words: int = 200,
 ) -> str:
     """
     Если текст короткий — не тратим токены на LLM.
     Иначе один вызов `summarization_reduce.j2` (в полной версии — map по батчам + reduce).
     """
     blob = bundle.combined_posts_text
-    if len(blob) < 3500:
-        return blob
+    if not blob.strip():
+        return ""
 
     rel = f"{bundle.analyzer_id}/summarization_reduce.j2"
     user_prompt = renderer.render(
