@@ -14,13 +14,14 @@ import re
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
+from statistics import mean, median
 from typing import Any
 
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionDeveloperMessageParam, ChatCompletionUserMessageParam
-from qdrant_client.models import PayloadSchemaType
+from qdrant_client.models import FieldCondition, Filter, MatchValue, PayloadSchemaType
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -58,17 +59,26 @@ from app.schemas.intelligence import (
     ChannelCard,
     ChannelDetail,
     CompareChannelRow,
+    CompareChannelInsight,
+    CompareChannelMetrics,
     CompareChannelsRequest,
     CompareChannelsResponse,
     ManualReviewFlags,
     SearchChannelsRequest,
     SearchChannelsResponse,
+    SimilarChannelSignals,
     SimilarChannelItem,
     SimilarChannelsResponse,
+    SimilarSourceChannel,
     SummarizePostsRequest,
     SummarizePostsByHandleRequest,
     SummarizePostsResponse,
     AnalyzeChannelByHandleRequest,
+    SemanticResultItem,
+    SemanticSearchHit,
+    SemanticSearchRequest,
+    SemanticSearchResponse,
+    SemanticSource,
 )
 from app.services.channel_search_planner import merge_planner_with_user_request, plan_channel_search
 from app.services.vector_service import VectorService
@@ -320,21 +330,30 @@ class IntelligenceService:
 
     async def search_channels(self, body: SearchChannelsRequest) -> SearchChannelsResponse:
         """Сценарий 1: каталог в SQLite + сценарий 8 при необходимости."""
+        all_topics_mode = body.search_source == "saved_catalog" and body.topic.strip().lower() in {
+            "*",
+            "__all__",
+            "___all___",
+            "all",
+            "все темы",
+        }
         review = self._manual_review_too_broad(body)
-        if review is not None:
+        if review is not None and not all_topics_mode:
             return SearchChannelsResponse(
                 channels=[],
                 manual_review=review,
                 normalized_filters=body.model_dump(),
                 background_job=None,
+                has_more=False,
             )
         extra_review = await self._review_extra_conditions(body)
-        if extra_review is not None:
+        if extra_review is not None and not all_topics_mode:
             return SearchChannelsResponse(
                 channels=[],
                 manual_review=extra_review,
                 normalized_filters=body.model_dump(),
                 background_job=None,
+                has_more=False,
             )
         last_post_at_gte: datetime | None = None
         last_post_at_lte: datetime | None = None
@@ -354,6 +373,7 @@ class IntelligenceService:
                         status="failed",
                         detail="OrchestrationCoordinator не смонтирован (lifespan приложения).",
                     ),
+                    has_more=False,
                 )
             if not self._telethon_live_available:
                 return SearchChannelsResponse(
@@ -365,6 +385,7 @@ class IntelligenceService:
                         status="failed",
                         detail=self._telegram_live_unavailable_detail(),
                     ),
+                    has_more=False,
                 )
             live_payload = body.model_dump()
             live_payload["min_subscribers"] = None
@@ -390,18 +411,58 @@ class IntelligenceService:
                         "Задание в очереди: Telethon → SQLite → metrics → AI → vector."
                     ),
                 ),
+                has_more=False,
+            )
+
+        if all_topics_mode:
+            page_size = int(body.count or 20)
+            catalog_limit: int | None = None if body.count is None else (page_size + 1)
+            rows = await self._channels.search_catalog(
+                topic="__all__",
+                limit=catalog_limit,
+                offset=int(body.offset or 0),
+                min_subscribers=body.min_subscribers,
+                max_subscribers=body.max_subscribers,
+                language=body.language,
+                region_country=body.region_country,
+                new_only=body.channel_type == "new_only",
+                sort_by=body.sort_by,
+                sort_order=body.sort_order,
+                username_query=body.username_query,
+                last_post_at_gte=last_post_at_gte,
+                last_post_at_lte=last_post_at_lte,
+            )
+            has_more = False
+            if page_size > 0 and len(rows) > page_size:
+                has_more = True
+                rows = rows[:page_size]
+            cards = [ChannelCard.model_validate(r) for r in rows]
+            normalized = {
+                **body.model_dump(mode="json"),
+                "all_topics_mode": True,
+                "saved_catalog_topics_tried": ["__all__"],
+            }
+            return SearchChannelsResponse(
+                channels=cards,
+                manual_review=None,
+                normalized_filters=normalized,
+                background_job=None,
+                has_more=has_more,
             )
 
         planner = await plan_channel_search(self._settings, body.model_dump(mode="json"))
         merged = merge_planner_with_user_request(body.model_dump(mode="json"), planner)
         planner_topic = str(merged.get("search_topic") or body.topic).strip()
         user_topic = body.topic.strip()
-        limit_n = int(merged.get("count") or body.count or 20)
-        catalog_limit: int | None = None if body.count is None else limit_n
+        # Для серверной пагинации размер страницы должен задаваться клиентом,
+        # иначе planner может "сжимать" count (например до 17) и ломать infinite scroll.
+        page_size = int(body.count or merged.get("count") or 20)
+        catalog_limit: int | None = None if body.count is None else (page_size + 1)
         eff_sort_by = "last_sync_at" if merged.get("channel_type") == "new_only" else body.sort_by
         eff_sort_order = "desc" if merged.get("channel_type") == "new_only" else body.sort_order
         catalog_kw: dict[str, Any] = {
             "limit": catalog_limit,
+            "offset": int(body.offset or 0),
             "min_subscribers": merged.get("min_subscribers"),
             "max_subscribers": merged.get("max_subscribers"),
             "language": merged.get("language"),
@@ -445,6 +506,10 @@ class IntelligenceService:
                     reverse=rev,
                 )
             rows = merged_rows if catalog_limit is None else merged_rows[:catalog_limit]
+        has_more = False
+        if page_size > 0 and len(rows) > page_size:
+            has_more = True
+            rows = rows[:page_size]
         cards = [ChannelCard.model_validate(r) for r in rows]
         try:
             await self._record_catalog_search_audit(body, planner, rows)
@@ -466,6 +531,7 @@ class IntelligenceService:
             manual_review=None,
             normalized_filters=normalized,
             background_job=None,
+            has_more=has_more,
         )
 
     async def get_channel_detail(self, channel_id: int) -> ChannelDetail | None:
@@ -1127,6 +1193,8 @@ class IntelligenceService:
                 post_vectors_payloads.append(payload)
         qdrant_saved = False
         qdrant_error: str | None = None
+        saved_post_points = 0
+        saved_window_points = 0
         try:
             post_vectors = await openai_client.embeddings.create(model=emb_model, input=post_texts)
             dim = len(post_vectors.data[0].embedding)
@@ -1137,6 +1205,7 @@ class IntelligenceService:
                 vectors=[x.embedding for x in post_vectors.data],
                 payloads=post_vectors_payloads,
             )
+            saved_post_points = len(post_ids)
 
             window_text = "\n".join(
                 x for x in (window["window_summary_short"], window["window_summary_detailed"]) if x
@@ -1171,7 +1240,16 @@ class IntelligenceService:
                 vectors=[window_embedding.data[0].embedding],
                 payloads=[window_payload],
             )
+            saved_window_points = 1
             qdrant_saved = True
+            logger.info(
+                "scenario3 qdrant saved: channel_id=%s post_points=%s window_points=%s collections=%s,%s",
+                ch.id,
+                saved_post_points,
+                saved_window_points,
+                post_collection,
+                window_collection,
+            )
         except Exception as exc:  # noqa: BLE001
             qdrant_error = str(exc)
             logger.warning("scenario3 qdrant unavailable, skip save: %s", exc)
@@ -1209,12 +1287,325 @@ class IntelligenceService:
         )
         return result, None
 
+    def _semantic_route_mode(self, query: str) -> tuple[str | None, str | None]:
+        q = query.strip().lower()
+        if len(q) < 8:
+            return None, "Слишком общий запрос"
+        vague = {"найди интересное", "что сейчас важно", "найди хорошие каналы", "найди про"}
+        if q in vague:
+            return None, "Слишком общий запрос"
+        personal_chat_markers = (
+            "думаешь ты",
+            "что думаешь",
+            "как думаешь",
+            "ты думаешь",
+            "твое мнение",
+            "твоё мнение",
+            "расскажи о себе",
+            "кто ты",
+        )
+        if any(marker in q for marker in personal_chat_markers):
+            return None, "Запрос не относится к анализу накопленных постов/каналов"
+        has_channels = any(x in q for x in ("канал", "каналы"))
+        has_posts = any(x in q for x in ("пост", "посты", "сообщения"))
+        has_question = any(q.startswith(x) for x in ("о чем", "что", "какие", "есть ли", "почему", "зачем"))
+        has_corpus_anchor = any(
+            x in q
+            for x in (
+                "канал",
+                "каналы",
+                "пост",
+                "посты",
+                "сообщени",
+                "в накопленных",
+                "в данных",
+                "по данным",
+                "по постам",
+                "про ",
+            )
+        )
+        if has_channels and not has_posts:
+            return "channel_search", None
+        if has_posts and not has_channels:
+            return "post_search", None
+        if has_question:
+            if not has_corpus_anchor:
+                return None, "Неясно, что искать в накопленных постах или каналах"
+            return "question_answering_over_posts", None
+        if has_channels and has_posts:
+            return None, "Неясно, нужно искать посты или каналы"
+        if "про " not in q and "о " not in q:
+            return None, "Не указана тема анализа"
+        return "post_search", None
+
+    async def semantic_search_scenario4(self, body: SemanticSearchRequest) -> SemanticSearchResponse:
+        logger.info("scenario4 routing: raw_query=%s", body.query)
+        mode, reason = self._semantic_route_mode(body.query)
+        if reason:
+            return SemanticSearchResponse(needs_review=True, reason=reason, query=body.query, mode=None)
+
+        openai = AsyncOpenAI(api_key=self._settings.openai_api_key)
+        emb = await openai.embeddings.create(model=self._settings.openai_embedding_model, input=[body.query])
+        qvec = emb.data[0].embedding
+        logger.info("scenario4 retrieval: mode=%s limit=%s", mode, body.limit)
+        qdrant = QdrantStore(self._settings)
+        try:
+            has_post_collection = await qdrant.collection_exists("telegram_post_summaries")
+            has_window_collection = await qdrant.collection_exists("telegram_channel_windows")
+            post_points_count = (
+                await qdrant.collection_points_count("telegram_post_summaries")
+                if has_post_collection
+                else None
+            )
+            window_points_count = (
+                await qdrant.collection_points_count("telegram_channel_windows")
+                if has_window_collection
+                else None
+            )
+            logger.info(
+                "scenario4 collections: post=%s (%s points) window=%s (%s points) qdrant_url=%s",
+                has_post_collection,
+                post_points_count,
+                has_window_collection,
+                window_points_count,
+                self._settings.qdrant_url,
+            )
+            if not has_post_collection or not has_window_collection:
+                missing = []
+                if not has_post_collection:
+                    missing.append("telegram_post_summaries")
+                if not has_window_collection:
+                    missing.append("telegram_channel_windows")
+                return SemanticSearchResponse(
+                    needs_review=True,
+                    reason=(
+                        "В векторной базе пока нет нужных коллекций: "
+                        + ", ".join(missing)
+                        + ". Сначала запустите «Резюмировать посты» минимум для одного канала."
+                    ),
+                    query=body.query,
+                    mode=mode,
+                )
+            if (post_points_count or 0) <= 0 and (window_points_count or 0) <= 0:
+                return SemanticSearchResponse(
+                    needs_review=True,
+                    reason=(
+                        "Коллекции в векторной базе существуют, но пока пустые. "
+                        "Запустите «Резюмировать посты» и убедитесь в сообщении об успешном сохранении в векторную базу."
+                    ),
+                    query=body.query,
+                    mode=mode,
+                )
+            post_points = await qdrant.search_in_collection(
+                collection_name="telegram_post_summaries",
+                query_vector=qvec,
+                limit=max(30, body.limit * 3),
+            )
+            window_points = await qdrant.search_in_collection(
+                collection_name="telegram_channel_windows",
+                query_vector=qvec,
+                limit=max(20, body.limit * 2),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("scenario4 retrieval failed: %s", exc)
+            return SemanticSearchResponse(
+                needs_review=True,
+                reason=(
+                    "Не удалось выполнить поиск в векторной базе. "
+                    "Проверьте доступность Qdrant и наличие данных из сценария 3. "
+                    f"Техническая причина: {exc}"
+                ),
+                query=body.query,
+                mode=mode,
+            )
+        finally:
+            await qdrant.close()
+
+        username_filter = (body.channel_username or "").strip().lstrip("@").lower()
+        post_rows: list[dict[str, Any]] = []
+        for p in post_points:
+            payload = dict(p.payload or {})
+            uname = str(payload.get("channel_username") or "").lstrip("@").lower()
+            if username_filter and uname != username_filter:
+                continue
+            txt = str(payload.get("post_summary_short") or payload.get("search_text") or payload.get("clean_text") or "")
+            bonus = 0.08 if any(w in txt.lower() for w in body.query.lower().split()[:4]) else 0.0
+            score = float(p.score or 0.0) + bonus
+            source_url = None
+            if payload.get("channel_username") and payload.get("message_id"):
+                source_url = f"https://t.me/{str(payload['channel_username']).lstrip('@')}/{int(payload['message_id'])}"
+            post_rows.append(
+                {
+                    "score": score,
+                    "channel_username": payload.get("channel_username"),
+                    "message_id": payload.get("message_id"),
+                    "summary": txt,
+                    "source_url": source_url,
+                    "payload": payload,
+                    "point_id": str(p.id),
+                }
+            )
+        post_rows.sort(key=lambda x: x["score"], reverse=True)
+
+        window_rows: list[dict[str, Any]] = []
+        for p in window_points:
+            payload = dict(p.payload or {})
+            uname = str(payload.get("channel_username") or "").lstrip("@").lower()
+            if username_filter and uname != username_filter:
+                continue
+            txt = str(payload.get("window_summary_short") or payload.get("window_summary_detailed") or "")
+            window_rows.append(
+                {
+                    "score": float(p.score or 0.0),
+                    "channel_username": payload.get("channel_username"),
+                    "summary": txt,
+                    "payload": payload,
+                    "point_id": str(p.id),
+                }
+            )
+        window_rows.sort(key=lambda x: x["score"], reverse=True)
+
+        hits: list[SemanticSearchHit] = []
+        for row in post_rows[: body.limit]:
+            p = row["payload"]
+            hits.append(
+                SemanticSearchHit(
+                    point_id=row["point_id"],
+                    score=row["score"],
+                    channel_id=int(p["channel_id"]) if p.get("channel_id") is not None else None,
+                    channel_username=str(p.get("channel_username") or "").strip() or None,
+                    post_id=int(p["message_id"]) if p.get("message_id") is not None else None,
+                    published_at=(
+                        datetime.fromisoformat(str(p["published_at"]))
+                        if p.get("published_at")
+                        else None
+                    ),
+                    source_url=row["source_url"],
+                    content_type="post",
+                    text_preview=(row["summary"][:400] + "…") if len(row["summary"]) > 400 else row["summary"],
+                )
+            )
+
+        sources = [
+            SemanticSource(
+                channel_username=r.get("channel_username"),
+                message_id=int(r["message_id"]) if r.get("message_id") is not None else None,
+                source_url=r.get("source_url"),
+                score=r.get("score"),
+                summary=r.get("summary"),
+            )
+            for r in post_rows[: body.limit]
+        ]
+
+        results: list[SemanticResultItem] = []
+        if mode == "post_search":
+            for r in post_rows[: body.limit]:
+                results.append(
+                    SemanticResultItem(
+                        channel_username=r.get("channel_username"),
+                        title="Релевантный пост",
+                        relevance_reason="Семантически близок к запросу по теме и формулировкам.",
+                        source_url=r.get("source_url"),
+                        score=r.get("score"),
+                    )
+                )
+            answer = "Найдены наиболее релевантные посты по вашему запросу."
+        elif mode == "channel_search":
+            by_channel: dict[str, dict[str, Any]] = {}
+            for r in post_rows[: max(body.limit * 3, 10)]:
+                key = str(r.get("channel_username") or "")
+                if not key:
+                    continue
+                entry = by_channel.setdefault(
+                    key,
+                    {
+                        "sum_score": 0.0,
+                        "count": 0,
+                        "source_url": f"https://t.me/{key.lstrip('@')}",
+                    },
+                )
+                entry["sum_score"] += float(r.get("score") or 0.0)
+                entry["count"] += 1
+            ranked = sorted(
+                by_channel.items(),
+                key=lambda x: (x[1]["sum_score"] / max(1, x[1]["count"])),
+                reverse=True,
+            )[: body.limit]
+            for uname, data in ranked:
+                avg_score = float(data["sum_score"]) / max(1, int(data["count"]))
+                results.append(
+                    SemanticResultItem(
+                        channel_username=uname,
+                        title=f"Канал @{str(uname).lstrip('@')}",
+                        relevance_reason=None,
+                        source_url=data.get("source_url"),
+                        score=avg_score,
+                    )
+                )
+            answer = "Найдены каналы, которые чаще всего пишут по нужной теме."
+        else:
+            evidence = "\n".join(f"- @{s.channel_username}: {s.summary}" for s in sources[:8] if s.summary)
+            prompt = (
+                "Дай короткий ответ на вопрос строго по evidence. Не выдумывай факты.\n"
+                f"Вопрос: {body.query}\nEvidence:\n{evidence[:6000]}"
+            )
+            try:
+                comp = await openai.chat.completions.create(
+                    model=self._settings.openai_chat_model,
+                    messages=[
+                        {"role": "system", "content": "Ты аналитик. Отвечай только по данным evidence."},
+                        {"role": "user", "content": prompt},
+                    ],
+                )
+                answer = (comp.choices[0].message.content or "").strip() or "Недостаточно evidence для уверенного ответа."
+            except Exception:
+                answer = "Недостаточно evidence для уверенного ответа."
+            for s in sources[: body.limit]:
+                results.append(
+                    SemanticResultItem(
+                        channel_username=s.channel_username,
+                        title="Источник для ответа",
+                        relevance_reason="Использован как evidence для ответа на вопрос.",
+                        source_url=s.source_url,
+                        score=s.score,
+                    )
+                )
+
+        logger.info("scenario4 complete: mode=%s results=%s sources=%s", mode, len(results), len(sources))
+        return SemanticSearchResponse(
+            needs_review=False,
+            reason=None,
+            query=body.query,
+            mode=mode,
+            answer=answer,
+            results=results,
+            sources=sources,
+            hits=hits,
+            synthesis_placeholder=window_rows[0]["summary"] if window_rows and mode != "question_answering_over_posts" else None,
+        )
+
     async def compare_channels(
         self,
         body: CompareChannelsRequest,
     ) -> CompareChannelsResponse | None:
-        """Сценарий 5: сравнение метрик по выбранным каналам."""
+        """Сценарий 5: сравнение каналов за 30 дней (метрики + evidence + AI synthesis)."""
+
+        def percentile(vals: list[float], p: float) -> float:
+            if not vals:
+                return 0.0
+            arr = sorted(vals)
+            if len(arr) == 1:
+                return float(arr[0])
+            idx = (len(arr) - 1) * p
+            lo = int(idx)
+            hi = min(lo + 1, len(arr) - 1)
+            frac = idx - lo
+            return float(arr[lo] * (1 - frac) + arr[hi] * frac)
+
+        now_utc = datetime.now(timezone.utc)
+        from_dt = now_utc - timedelta(days=30)
         rows_out: list[CompareChannelRow] = []
+        raw_metrics: list[dict[str, Any]] = []
         for cid in body.channel_ids:
             ch = await self._channels.get_by_id(cid)
             if ch is None:
@@ -1227,13 +1618,233 @@ class IntelligenceService:
                     subscriber_count=ch.subscriber_count,
                     posts_per_week_estimate=ch.posts_per_week_estimate,
                     primary_topic=ch.primary_topic,
-                ),
+                )
             )
+
+            posts_window: list[TelegramPostBrief] = []
+            if self._telegram is not None:
+                ident: str | int = ch.username if ch.username else ch.telegram_id
+                try:
+                    fetched = await self._telegram.fetch_recent_posts(ident, limit=100)
+                    posts_window = [p for p in fetched if ensure_utc_aware(p.date_utc) >= from_dt and (p.text or "").strip()]
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("compare.telethon fetch failed channel_id=%s: %s", ch.id, exc)
+
+            if not posts_window:
+                db_posts_q = await self._session.execute(
+                    select(Post)
+                    .where(Post.channel_id == ch.id)
+                    .where(Post.posted_at >= from_dt)
+                    .order_by(Post.posted_at.desc())
+                    .limit(120)
+                )
+                db_posts = list(db_posts_q.scalars().all())
+                posts_window = [
+                    TelegramPostBrief(
+                        telegram_message_id=int(p.telegram_message_id),
+                        date_utc=ensure_utc_aware(p.posted_at),
+                        text=p.text,
+                        views=p.views_count,
+                        forwards=p.forwards_count,
+                    )
+                    for p in db_posts
+                    if (p.text or "").strip()
+                ]
+
+            views = [float(p.views or 0) for p in posts_window if (p.views or 0) > 0]
+            fwds = [float(p.forwards or 0) for p in posts_window]
+            ers = [float((p.forwards or 0) / max((p.views or 0), 1)) for p in posts_window if (p.views or 0) > 0]
+
+            by_week: dict[str, int] = {}
+            by_day_avg_views: dict[str, list[float]] = {}
+            for p in posts_window:
+                dt = ensure_utc_aware(p.date_utc)
+                year_week = f"{dt.isocalendar().year}-{dt.isocalendar().week}"
+                by_week[year_week] = by_week.get(year_week, 0) + 1
+                day = dt.date().isoformat()
+                by_day_avg_views.setdefault(day, []).append(float(p.views or 0))
+
+            weekly_counts = list(by_week.values())
+            weekly_mean = mean(weekly_counts) if weekly_counts else 0.0
+            weekly_cv = (float((sum((x - weekly_mean) ** 2 for x in weekly_counts) / max(len(weekly_counts), 1)) ** 0.5) / max(weekly_mean, 1e-6)) if weekly_counts else 1.0
+            weekly_stability = max(0.0, min(100.0, 100.0 * (1.0 - min(1.0, weekly_cv))))
+
+            day_series = sorted((d, mean(v)) for d, v in by_day_avg_views.items())
+            if len(day_series) >= 2:
+                xs = list(range(len(day_series)))
+                ys = [float(v) for _, v in day_series]
+                mx = mean(xs)
+                my = mean(ys)
+                num = sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True))
+                den = sum((x - mx) ** 2 for x in xs) or 1.0
+                trend_slope = num / den
+            else:
+                trend_slope = 0.0
+
+            all_text = " ".join((p.text or "") for p in posts_window).lower()
+            tone_label = "нет данных" if not posts_window else "нейтральный"
+            if posts_window and any(w in all_text for w in ("кризис", "падение", "риск", "проблем")):
+                tone_label = "тревожный"
+            elif posts_window and any(w in all_text for w in ("рост", "успех", "возможност", "прибыль")):
+                tone_label = "позитивный"
+            topic_labels: list[str] = []
+            for t in ("финанс", "инвест", "крипт", "недвиж", "ai", "маркетинг", "стартап"):
+                if t in all_text:
+                    topic_labels.append(t)
+            if not topic_labels:
+                topic_labels = [ch.primary_topic or "общая тематика"]
+
+            commercial_markers = ("подписывайтесь", "реклама", "партнер", "партнёр", "скидк", "купит", "промокод")
+            commercial_posts = sum(1 for p in posts_window if any(m in (p.text or "").lower() for m in commercial_markers))
+            commercial_share = commercial_posts / max(len(posts_window), 1)
+
+            first_dt = min((ensure_utc_aware(p.date_utc) for p in posts_window), default=from_dt)
+            last_dt = max((ensure_utc_aware(p.date_utc) for p in posts_window), default=now_utc)
+            span_days = max((last_dt - first_dt).total_seconds() / 86400.0, 1.0)
+            freq_week = len(posts_window) / (span_days / 7.0)
+            avg_views = float(mean(views)) if views else 0.0
+            med_views = float(median(views)) if views else 0.0
+            p75_views = percentile(views, 0.75)
+            avg_fwds = float(mean(fwds)) if fwds else 0.0
+            er_mean = float(mean(ers)) if ers else 0.0
+            er_p75 = percentile(ers, 0.75)
+
+            evidence_urls: list[str] = []
+            for p in sorted(posts_window, key=lambda x: (x.forwards or 0, x.views or 0), reverse=True)[:5]:
+                if ch.username:
+                    evidence_urls.append(f"https://t.me/{ch.username.lstrip('@')}/{p.telegram_message_id}")
+
+            raw_metrics.append(
+                {
+                    "channel": ch,
+                    "posts_in_window": len(posts_window),
+                    "posting_frequency_per_week": freq_week,
+                    "avg_views": avg_views,
+                    "median_views": med_views,
+                    "p75_views": p75_views,
+                    "avg_forwards": avg_fwds,
+                    "er_forward_rate_mean": er_mean,
+                    "er_forward_rate_p75": er_p75,
+                    "weekly_stability_score": weekly_stability,
+                    "views_trend_slope": trend_slope,
+                    "tone_label": tone_label,
+                    "topic_labels": topic_labels[:6],
+                    "commercial_intent_share": commercial_share,
+                    "evidence_urls": evidence_urls,
+                }
+            )
+
+        max_avg_views = max((m["avg_views"] for m in raw_metrics), default=1.0)
+        max_freq = max((m["posting_frequency_per_week"] for m in raw_metrics), default=1.0)
+        max_er = max((m["er_forward_rate_mean"] for m in raw_metrics), default=1.0)
+        max_stability = 100.0
+        max_trend = max((abs(m["views_trend_slope"]) for m in raw_metrics), default=1.0)
+        insights: list[CompareChannelInsight] = []
+        for m in raw_metrics:
+            score = (
+                0.24 * (m["avg_views"] / max(max_avg_views, 1e-6))
+                + 0.18 * (m["posting_frequency_per_week"] / max(max_freq, 1e-6))
+                + 0.22 * (m["er_forward_rate_mean"] / max(max_er, 1e-6))
+                + 0.16 * (m["weekly_stability_score"] / max_stability)
+                + 0.10 * (0.5 + 0.5 * (m["views_trend_slope"] / max(max_trend, 1e-6)))
+                + 0.10 * (1.0 - min(1.0, m["commercial_intent_share"]))
+            ) * 100.0
+            ch = m["channel"]
+            strengths: list[str] = []
+            if m["posts_in_window"] == 0:
+                strengths.append("За последние 30 дней в доступных данных не найдено постов для сравнения.")
+            if m["er_forward_rate_mean"] >= 0.03:
+                strengths.append("Выше среднего уровень пересылок к просмотрам (прокси вовлечённости).")
+            if m["weekly_stability_score"] >= 65:
+                strengths.append("Стабильный ритм публикаций в 30-дневном окне.")
+            if m["views_trend_slope"] > 0:
+                strengths.append("Есть положительный тренд охватов по дням.")
+            if not strengths:
+                strengths.append("Канал регулярно публикует контент и имеет измеримый охват.")
+
+            recommendations: list[str] = []
+            if m["posts_in_window"] == 0:
+                recommendations.append("Проверьте доступ к постам канала в Telethon и актуальность локальной истории постов.")
+            if m["commercial_intent_share"] > 0.35:
+                recommendations.append("Снизить долю продающих постов и усилить контент экспертного типа.")
+            if m["weekly_stability_score"] < 45:
+                recommendations.append("Выровнять публикационный график для повышения предсказуемости охватов.")
+            if m["er_forward_rate_mean"] < 0.01:
+                recommendations.append("Добавить больше цитируемого и прикладного контента для роста пересылок.")
+            if not recommendations:
+                recommendations.append("Поддерживать текущий формат, усиливая темы с максимальным откликом.")
+
+            metrics = CompareChannelMetrics(
+                posts_in_window=m["posts_in_window"],
+                posting_frequency_per_week=round(m["posting_frequency_per_week"], 3),
+                avg_views=round(m["avg_views"], 2),
+                median_views=round(m["median_views"], 2),
+                p75_views=round(m["p75_views"], 2),
+                avg_forwards=round(m["avg_forwards"], 2),
+                er_forward_rate_mean=round(m["er_forward_rate_mean"], 4),
+                er_forward_rate_p75=round(m["er_forward_rate_p75"], 4),
+                weekly_stability_score=round(m["weekly_stability_score"], 2),
+                views_trend_slope=round(m["views_trend_slope"], 3),
+                tone_label=m["tone_label"],
+                topic_labels=m["topic_labels"],
+                commercial_intent_share=round(m["commercial_intent_share"], 4),
+                normalized_score=round(max(0.0, min(100.0, score)), 2),
+            )
+            insights.append(
+                CompareChannelInsight(
+                    channel_id=ch.id,
+                    username=ch.username,
+                    strengths=strengths,
+                    recommendations=recommendations,
+                    evidence_urls=m["evidence_urls"],
+                    metrics=metrics,
+                )
+            )
+
+        insights.sort(key=lambda i: i.metrics.normalized_score, reverse=True)
         notes = (
-            "Сравнение по метрикам из БД. Для narrative-слоя подключите отдельный LLM-шаг "
-            "(см. AI_PIPELINE_ARCHITECTURE.md)."
+            "Сравнение выполнено по окну 30 дней на основе охватов, пересылок, стабильности публикаций, "
+            "тренда просмотров и контентных признаков. Нормализованный рейтинг учитывает размер и качество динамики."
         )
-        return CompareChannelsResponse(rows=rows_out, comparison_notes=notes)
+        if self._settings.openai_api_key:
+            try:
+                openai = AsyncOpenAI(api_key=self._settings.openai_api_key)
+                compact = [
+                    {
+                        "channel": x.username or str(x.channel_id),
+                        "score": x.metrics.normalized_score,
+                        "er": x.metrics.er_forward_rate_mean,
+                        "freq": x.metrics.posting_frequency_per_week,
+                        "stability": x.metrics.weekly_stability_score,
+                        "tone": x.metrics.tone_label,
+                        "topics": x.metrics.topic_labels,
+                    }
+                    for x in insights
+                ]
+                prompt = (
+                    "Сделай сравнительный анализ каналов на русском, кратко и по фактам. "
+                    "Структура: 1) кто лидирует и почему; 2) сильные стороны каждого; 3) практические рекомендации. "
+                    "Не используй английские слова, если есть русский эквивалент. "
+                    f"Данные: {json.dumps(compact, ensure_ascii=False)}"
+                )
+                comp = await openai.chat.completions.create(
+                    model=self._settings.openai_chat_model,
+                    messages=[
+                        {"role": "system", "content": "Ты аналитик Telegram-каналов. Не выдумывай факты."},
+                        {"role": "user", "content": prompt},
+                    ],
+                )
+                notes = (comp.choices[0].message.content or "").strip() or notes
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("compare llm synthesis failed: %s", exc)
+
+        return CompareChannelsResponse(
+            rows=rows_out,
+            comparison_notes=notes,
+            comparison_window_days=30,
+            generated_at=now_utc,
+            insights=insights,
+        )
 
     async def export_channels_payload(self, *, limit: int = 500) -> list[dict[str, Any]]:
         """Сериализация каналов для экспорта (сценарий 7)."""
@@ -1273,54 +1884,428 @@ class IntelligenceService:
         *,
         seed_channel_id: int,
         vector: VectorService,
-        limit: int = 10,
+        limit: int = 5,
     ) -> tuple[SimilarChannelsResponse, None] | tuple[None, str]:
-        """Сценарий 6: embedding профиля + поиск по постам, агрегация по channel_id."""
+        """Сценарий 6: похожие каналы — Qdrant (сводки/окна/профиль) + fallback по каталогу."""
+        del vector
+        _PROFILE_COLL = "telegram_channel_profiles"
+
+        def _norm_topic_tokens(*parts: str | None) -> set[str]:
+            raw = " ".join(str(p).lower() for p in parts if p)
+            return {t for t in re.findall(r"[\wа-яА-ЯёЁ]{3,}", raw) if len(t) >= 3}
+
+        def _topics_from_row(row: Channel) -> set[str]:
+            out: set[str] = set()
+            if row.primary_topic:
+                for part in str(row.primary_topic).replace(";", ",").split(","):
+                    t = part.strip().lower()
+                    if len(t) >= 3:
+                        out.add(t)
+            tj = row.topics_json
+            if isinstance(tj, list):
+                for x in tj:
+                    s = str(x).strip().lower()
+                    if len(s) >= 2:
+                        out.add(s)
+            return out
+
+        def _to_vec(raw: Any) -> list[float]:
+            if isinstance(raw, dict):
+                if not raw:
+                    return []
+                raw = next(iter(raw.values()))
+            if not raw:
+                return []
+            return [float(x) for x in raw]
+
+        def _avg_vector(vectors: list[list[float]]) -> list[float]:
+            if not vectors:
+                return []
+            dim = len(vectors[0])
+            acc = [0.0] * dim
+            for v in vectors:
+                if len(v) != dim:
+                    continue
+                for i in range(dim):
+                    acc[i] += v[i]
+            n = max(1, len([x for x in vectors if len(x) == dim]))
+            return [x / n for x in acc]
+
+        def _jaccard(a: set[str], b: set[str]) -> float:
+            if not a or not b:
+                return 0.0
+            inter = len(a & b)
+            union = len(a | b)
+            return float(inter) / float(union) if union else 0.0
+
+        def _top_overlap_tokens(a: set[str], b: set[str], cap: int = 3) -> list[str]:
+            shared = sorted((a & b), key=lambda x: (-len(x), x))
+            return shared[:cap]
+
+        def _freq_sim(a: float | None, b: float | None) -> float:
+            x = float(a or 0.0)
+            y = float(b or 0.0)
+            denom = max(x, y, 1.0)
+            return max(0.0, 1.0 - abs(x - y) / denom)
+
+        async def _embed_query_text(text: str) -> list[float]:
+            if not self._settings.openai_api_key or not text.strip():
+                return []
+            openai = AsyncOpenAI(api_key=self._settings.openai_api_key)
+            emb = await openai.embeddings.create(
+                model=self._settings.openai_embedding_model,
+                input=[text[: self._settings.embedding_max_chunk_chars]],
+            )
+            return list(emb.data[0].embedding)
+
         ch = await self._channels.get_by_id(seed_channel_id)
         if ch is None:
             return None, "not_found"
+        logger.info("similar.validation seed_channel_id=%s", seed_channel_id)
+        quality_notes: list[str] = []
 
-        profile = "\n".join(
-            x
-            for x in (
-                ch.title or "",
-                ch.description or "",
-                ch.primary_topic or "",
+        exclude_other = Filter(
+            must_not=[
+                FieldCondition(key="channel_id", match=MatchValue(value=int(seed_channel_id))),
+            ],
+        )
+
+        qdrant = QdrantStore(self._settings)
+        try:
+            has_posts = await qdrant.collection_exists("telegram_post_summaries")
+            has_windows = await qdrant.collection_exists("telegram_channel_windows")
+            has_profile = await qdrant.collection_exists(_PROFILE_COLL)
+            if not has_posts and not has_windows and not has_profile:
+                quality_notes.append(
+                    "Векторные коллекции недоступны — используется подбор только по карточкам каналов в каталоге."
+                )
+
+            seed_posts: list[Any] = []
+            seed_windows: list[Any] = []
+            if has_posts:
+                seed_posts = await qdrant.scroll_in_collection(
+                    collection_name="telegram_post_summaries",
+                    limit=80,
+                    query_filter=Filter(
+                        must=[FieldCondition(key="channel_id", match=MatchValue(value=int(ch.id)))]
+                    ),
+                    with_vectors=True,
+                )
+            if has_windows:
+                seed_windows = await qdrant.scroll_in_collection(
+                    collection_name="telegram_channel_windows",
+                    limit=10,
+                    query_filter=Filter(
+                        must=[FieldCondition(key="channel_id", match=MatchValue(value=int(ch.id)))]
+                    ),
+                    with_vectors=True,
+                )
+            seed_profile_pts: list[Any] = []
+            if has_profile:
+                seed_profile_pts = await qdrant.scroll_in_collection(
+                    collection_name=_PROFILE_COLL,
+                    limit=5,
+                    query_filter=Filter(
+                        must=[FieldCondition(key="channel_id", match=MatchValue(value=int(ch.id)))]
+                    ),
+                    with_vectors=True,
+                )
+
+            logger.info(
+                "similar.profile_building seed_channel_id=%s posts=%s windows=%s profiles=%s",
+                ch.id,
+                len(seed_posts),
+                len(seed_windows),
+                len(seed_profile_pts),
             )
-            if x.strip()
-        )
-        if not profile.strip():
-            profile = ch.username or f"channel_{ch.id}"
 
-        hits = await vector.semantic_search(
-            query=profile,
-            limit=50,
-            content_type="post",
-        )
-        by_channel: dict[int, float] = {}
-        for h in hits:
-            props = h.properties
-            cid = props.get("channel_id")
-            if cid is None:
-                continue
-            ic = int(cid)
-            if ic == seed_channel_id or ic < 0:
-                continue
-            sc = h.score if h.score is not None else 0.0
-            prev = by_channel.get(ic)
-            if prev is None or sc > prev:
-                by_channel[ic] = sc
+            seed_topics: set[str] = set()
+            seed_tones: set[str] = set()
+            seed_vectors: list[list[float]] = []
+            for p in list(seed_posts) + list(seed_windows):
+                payload = dict(p.payload or {})
+                for t in payload.get("post_topics") or payload.get("window_topics") or []:
+                    tt = str(t).strip().lower()
+                    if tt:
+                        seed_topics.add(tt)
+                tone = str(payload.get("tone_label") or payload.get("window_tone") or "").strip().lower()
+                if tone:
+                    seed_tones.add(tone)
+                vec = _to_vec(getattr(p, "vector", None))
+                if vec:
+                    seed_vectors.append(vec)
+            for p in seed_profile_pts:
+                vec = _to_vec(getattr(p, "vector", None))
+                if vec:
+                    seed_vectors.append(vec)
 
-        ranked = sorted(by_channel.items(), key=lambda x: x[1], reverse=True)[:limit]
-        similar: list[SimilarChannelItem] = []
-        for cid, score in ranked:
-            row = await self._channels.get_by_id(cid)
-            similar.append(
+            if len(seed_posts) < 2 and len(seed_windows) < 1:
+                quality_notes.append(
+                    "Мало сводок постов по исходному каналу в Qdrant — точность ниже; "
+                    "для лучшего матча выполните «Резюмировать посты» для этого канала."
+                )
+
+            query_vec = _avg_vector(seed_vectors)
+            if not query_vec:
+                catalog_blob = "\n".join(
+                    str(x).strip()
+                    for x in (ch.title, ch.description, ch.primary_topic, ch.topic_search)
+                    if x and str(x).strip()
+                )
+                if self._settings.openai_api_key and catalog_blob.strip():
+                    query_vec = await _embed_query_text(catalog_blob)
+                    quality_notes.append(
+                        "Запрос близости построен по метаданным канала (название, описание, тема), "
+                        "так как в Qdrant не найдены векторы сводок."
+                    )
+                if not query_vec:
+                    return (
+                        SimilarChannelsResponse(
+                            needs_review=True,
+                            reason=(
+                                "Недостаточно данных для подбора: нет векторного профиля и не настроены ключи "
+                                "OpenAI для расчёта эмбеддинга по карточке канала."
+                            ),
+                            mode=None,
+                            source_channel=SimilarSourceChannel(channel_id=ch.id, channel_username=ch.username),
+                            results=[],
+                            quality_notes=quality_notes,
+                        ),
+                        None,
+                    )
+
+            logger.info("similar.retrieval seed_channel_id=%s", ch.id)
+            pool_size = max(60, limit * 12)
+            cand_points: list[Any] = []
+            if has_posts:
+                cand_points.extend(
+                    await qdrant.search_in_collection(
+                        collection_name="telegram_post_summaries",
+                        query_vector=query_vec,
+                        limit=pool_size,
+                        query_filter=exclude_other,
+                    )
+                )
+            if has_windows:
+                cand_points.extend(
+                    await qdrant.search_in_collection(
+                        collection_name="telegram_channel_windows",
+                        query_vector=query_vec,
+                        limit=max(24, limit * 5),
+                        query_filter=exclude_other,
+                    )
+                )
+            if has_profile:
+                cand_points.extend(
+                    await qdrant.search_in_collection(
+                        collection_name=_PROFILE_COLL,
+                        query_vector=query_vec,
+                        limit=max(40, limit * 8),
+                        query_filter=exclude_other,
+                    )
+                )
+
+            cand_by_channel: dict[int, dict[str, Any]] = {}
+            for p in cand_points:
+                payload = dict(p.payload or {})
+                cid_raw = payload.get("channel_id")
+                if cid_raw is None:
+                    continue
+                cid = int(cid_raw)
+                if cid <= 0 or cid == seed_channel_id:
+                    continue
+                e = cand_by_channel.setdefault(
+                    cid,
+                    {
+                        "scores": [],
+                        "topics": set(),
+                        "tones": set(),
+                        "catalog_only": False,
+                    },
+                )
+                e["scores"].append(float(p.score or 0.0))
+                for t in payload.get("post_topics") or payload.get("window_topics") or []:
+                    tt = str(t).strip().lower()
+                    if tt:
+                        e["topics"].add(tt)
+                tone = str(payload.get("tone_label") or payload.get("window_tone") or "").strip().lower()
+                if tone:
+                    e["tones"].add(tone)
+
+            seed_text_tokens = _norm_topic_tokens(ch.title, ch.description, ch.primary_topic, ch.topic_search)
+            seed_row_topics = _topics_from_row(ch)
+            seed_union_tokens = seed_text_tokens | seed_row_topics
+            seed_anchor_tokens = _norm_topic_tokens(ch.primary_topic, ch.topic_search)
+            if not seed_topics:
+                seed_topics = set(seed_row_topics)
+
+            cat_rows = await self._channels.list_excluding_for_similarity(int(seed_channel_id), limit=400)
+            added_catalog = 0
+            for row in cat_rows:
+                if row.id in cand_by_channel:
+                    continue
+                cand_tokens = _norm_topic_tokens(row.title, row.description, row.primary_topic, row.topic_search)
+                cand_row_topics = _topics_from_row(row)
+                union_c = cand_tokens | cand_row_topics
+                text_sim = _jaccard(seed_union_tokens, union_c)
+                topic_anchor_overlap = bool(seed_anchor_tokens & (cand_tokens | cand_row_topics))
+                if seed_anchor_tokens and not topic_anchor_overlap and text_sim < 0.18:
+                    continue
+                if text_sim < 0.04 and not (seed_row_topics and cand_row_topics & seed_row_topics):
+                    continue
+                base = 0.18 + 0.62 * float(text_sim)
+                merged_topics = set(cand_row_topics) | cand_tokens
+                cand_by_channel[row.id] = {
+                    "scores": [min(0.92, base)],
+                    "topics": merged_topics,
+                    "tones": set(),
+                    "catalog_only": True,
+                }
+                added_catalog += 1
+            if added_catalog:
+                quality_notes.append(
+                    f"Для {added_catalog} кандидатов использован запасной портрет по данным каталога "
+                    "(без сводок постов в векторной базе)."
+                )
+
+            logger.info("similar.reranking seed_channel_id=%s candidates=%s", ch.id, len(cand_by_channel))
+            seed_freq = float(ch.posts_per_week_estimate or 0.0)
+            reranked: list[dict[str, Any]] = []
+            filtered_out_by_topic = 0
+            for cid, e in cand_by_channel.items():
+                row = await self._channels.get_by_id(cid)
+                if row is None:
+                    continue
+                cand_topic_set = set(e["topics"])
+                row_catalog_tokens = _norm_topic_tokens(row.title, row.description, row.primary_topic, row.topic_search)
+                topic_overlap = max(_jaccard(seed_topics, cand_topic_set), _jaccard(seed_row_topics, _topics_from_row(row)))
+                anchor_overlap = _jaccard(seed_anchor_tokens, row_catalog_tokens) if seed_anchor_tokens else 0.0
+                style_similarity = (
+                    1.0
+                    if seed_tones and set(e["tones"]) and (seed_tones & set(e["tones"]))
+                    else (0.52 if e["catalog_only"] else 0.45)
+                )
+                frequency_similarity = _freq_sim(seed_freq, row.posts_per_week_estimate)
+                base_similarity = max(e["scores"]) if e["scores"] else 0.0
+                if seed_anchor_tokens and anchor_overlap < 0.01 and topic_overlap < 0.08 and base_similarity < 0.6:
+                    filtered_out_by_topic += 1
+                    continue
+                score = (
+                    0.58 * base_similarity
+                    + 0.20 * topic_overlap
+                    + 0.12 * style_similarity
+                    + 0.10 * frequency_similarity
+                )
+                score_points = {
+                    "sem": 58.0 * base_similarity,
+                    "topic": 20.0 * topic_overlap,
+                    "style": 12.0 * style_similarity,
+                    "freq": 10.0 * frequency_similarity,
+                }
+                reasons: list[str] = []
+                overlap_tokens = _top_overlap_tokens(seed_union_tokens, cand_topic_set | row_catalog_tokens)
+                if overlap_tokens:
+                    reasons.append(f"Общие темы: {', '.join(overlap_tokens)}.")
+                if e.get("catalog_only"):
+                    reasons.append("Канал подобран по карточке каталога: пока без сводок постов в Qdrant.")
+                if style_similarity >= 0.8:
+                    reasons.append("Похожий тон публикаций по сводкам.")
+                if frequency_similarity >= 0.7:
+                    reasons.append("Сопоставимая частота публикаций.")
+                reasons.append(
+                    "Оценка: "
+                    f"{int(round(score * 100))}% = семантика {int(round(score_points['sem']))}п + "
+                    f"темы {int(round(score_points['topic']))}п + стиль {int(round(score_points['style']))}п + "
+                    f"частота {int(round(score_points['freq']))}п."
+                )
+                if not reasons:
+                    reasons.append("Сходство по совокупности признаков.")
+                missing_data: list[str] = []
+                if e.get("catalog_only"):
+                    missing_data.append("В Qdrant нет сводок постов по этому каналу — рекомендация опирается на каталог.")
+                if not e["scores"] or (max(e["scores"]) < 0.25 and not e.get("catalog_only")):
+                    missing_data.append("Низкая уверенность: мало пересечений в векторных сводках.")
+                reranked.append(
+                    {
+                        "channel_id": cid,
+                        "row": row,
+                        "score": max(0.0, min(1.0, score)),
+                        "catalog_only": bool(e.get("catalog_only")),
+                        "signals": SimilarChannelSignals(
+                            topic_overlap=round(float(topic_overlap), 4),
+                            style_similarity=round(float(style_similarity), 4),
+                            frequency_similarity=round(float(frequency_similarity), 4),
+                        ),
+                        "topics": list(sorted(set(e["topics"])))[:8],
+                        "reasons": reasons,
+                        "missing_data": missing_data,
+                    }
+                )
+            if filtered_out_by_topic:
+                quality_notes.append(
+                    f"Отфильтровано {filtered_out_by_topic} кандидатов с тематикой, далёкой от исходного канала."
+                )
+            reranked.sort(key=lambda x: x["score"], reverse=True)
+
+            logger.info("similar.diversification seed_channel_id=%s", ch.id)
+            lam = 0.55
+            selected: list[dict[str, Any]] = []
+            remaining = reranked[: max(limit * 5, 20)]
+            while remaining and len(selected) < limit:
+                best_idx = 0
+                best_val = float("-inf")
+                for idx, cand in enumerate(remaining):
+                    if not selected:
+                        mmr_val = cand["score"]
+                    else:
+                        cand_topics = set(cand["topics"])
+                        max_sim_to_selected = max(_jaccard(cand_topics, set(s["topics"])) for s in selected)
+                        mmr_val = lam * cand["score"] - (1 - lam) * max_sim_to_selected
+                    if mmr_val > best_val:
+                        best_val = mmr_val
+                        best_idx = idx
+                selected.append(remaining.pop(best_idx))
+
+            if not selected:
+                return (
+                    SimilarChannelsResponse(
+                        needs_review=True,
+                        reason="Не удалось подобрать похожие каналы по текущим данным каталога и векторной базы.",
+                        mode=None,
+                        source_channel=SimilarSourceChannel(channel_id=ch.id, channel_username=ch.username),
+                        results=[],
+                        quality_notes=quality_notes,
+                    ),
+                    None,
+                )
+
+            results = [
                 SimilarChannelItem(
-                    channel_id=cid,
-                    score=score,
-                    title=row.title if row else None,
-                    username=row.username if row else None,
+                    channel_id=int(x["channel_id"]),
+                    channel_username=(x["row"].username if x["row"] else None),
+                    title=(x["row"].title if x["row"] else None),
+                    score=round(float(x["score"]), 4),
+                    reasons=list(x["reasons"]),
+                    supporting_topics=list(x["topics"]),
+                    supporting_signals=x["signals"],
+                    missing_data=list(x["missing_data"]),
+                )
+                for x in selected[:limit]
+            ]
+            logger.info("similar.response_building seed_channel_id=%s results=%s", ch.id, len(results))
+            return (
+                SimilarChannelsResponse(
+                    needs_review=False,
+                    reason=None,
+                    mode="similar_channels",
+                    source_channel=SimilarSourceChannel(
+                        channel_id=ch.id,
+                        channel_username=ch.username,
+                    ),
+                    results=results,
+                    quality_notes=quality_notes,
                 ),
+                None,
             )
-        return SimilarChannelsResponse(seed_channel_id=seed_channel_id, similar=similar), None
+        finally:
+            await qdrant.close()

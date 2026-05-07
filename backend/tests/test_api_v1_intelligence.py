@@ -15,7 +15,9 @@ from app.schemas.intelligence import (
     SearchChannelsRequest,
     SearchChannelsResponse,
     SimilarChannelItem,
+    SimilarChannelSignals,
     SimilarChannelsResponse,
+    SimilarSourceChannel,
 )
 from app.services.vector_service import VectorSearchHit, VectorService
 
@@ -88,6 +90,50 @@ class _StubIntelligenceService:
     ) -> tuple[Any, str | None]:
         return None, "not_found"
 
+    async def semantic_search_scenario4(self, body: Any):
+        from app.schemas.intelligence import (
+            SemanticResultItem,
+            SemanticSearchHit,
+            SemanticSearchResponse,
+            SemanticSource,
+        )
+
+        return SemanticSearchResponse(
+            needs_review=False,
+            query=body.query,
+            mode="post_search",
+            answer="stub answer",
+            results=[
+                SemanticResultItem(
+                    channel_username="sample_channel",
+                    title="Релевантный пост",
+                    relevance_reason="stub reason",
+                    source_url="https://t.me/sample_channel/1",
+                    score=0.91,
+                )
+            ],
+            sources=[
+                SemanticSource(
+                    channel_username="sample_channel",
+                    message_id=1,
+                    source_url="https://t.me/sample_channel/1",
+                    score=0.91,
+                    summary="hello",
+                )
+            ],
+            hits=[
+                SemanticSearchHit(
+                    point_id="p1",
+                    score=0.91,
+                    channel_id=2,
+                    post_id=1,
+                    content_type="post",
+                    text_preview="hello",
+                )
+            ],
+            synthesis_placeholder=None,
+        )
+
     async def compare_channels(self, body: Any) -> Any:
         return None
 
@@ -150,6 +196,10 @@ def test_semantic_search_stub(client: TestClient) -> None:
     )
     assert r.status_code == 200
     data = r.json()
+    assert data["needs_review"] is False
+    assert data["mode"] == "post_search"
+    assert data["answer"] == "stub answer"
+    assert len(data["results"]) == 1
     assert len(data["hits"]) == 1
     assert data["hits"][0]["point_id"] == "p1"
 
@@ -225,14 +275,29 @@ def client_intel_real_stub_vector() -> TestClient:
         ):
             item = SimilarChannelItem(
                 channel_id=7,
-                score=0.5,
+                channel_username="o",
                 title="Other",
-                username="o",
+                score=0.5,
+                reasons=["Похож по темам"],
+                supporting_topics=["ai"],
+                supporting_signals=SimilarChannelSignals(
+                    topic_overlap=0.8,
+                    style_similarity=0.7,
+                    frequency_similarity=0.6,
+                ),
+                missing_data=[],
             )
             return (
                 SimilarChannelsResponse(
-                    seed_channel_id=seed_channel_id,
-                    similar=[item],
+                    needs_review=False,
+                    reason=None,
+                    mode="similar_channels",
+                    source_channel=SimilarSourceChannel(
+                        channel_id=seed_channel_id,
+                        channel_username="seed",
+                    ),
+                    results=[item],
+                    quality_notes=[],
                 ),
                 None,
             )
@@ -260,7 +325,8 @@ def client_intel_real_stub_vector() -> TestClient:
 def test_recommendations_ok(client_intel_real_stub_vector: TestClient) -> None:
     r = client_intel_real_stub_vector.get("/api/v1/recommendations/1")
     assert r.status_code == 200
-    assert r.json()["seed_channel_id"] == 1
+    assert r.json()["needs_review"] is False
+    assert r.json()["source_channel"]["channel_id"] == 1
 
 
 def test_openapi_contains_routes() -> None:
