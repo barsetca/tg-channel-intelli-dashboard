@@ -152,8 +152,11 @@ async def run_telethon_stage(
     if not query:
         raise RuntimeError("Пустой search_topic после планировщика.")
 
-    target = max(1, min(30, int(merged.get("count") or 20)))
+    target = max(1, min(15, int(merged.get("count") or 15)))
     user_topic = str(job.payload.get("topic") or "").strip()
+    username_query = str(job.payload.get("username_query") or "").strip()
+    live_mode = str(job.payload.get("live_channel_mode") or "new").strip().lower()
+    selected_channel_ids = [int(x) for x in (job.payload.get("selected_channel_ids") or []) if int(x) > 0]
     variants = _search_query_variants(query, user_topic, merged)
     hit_cap = _unique_hit_collection_cap(target, merged)
     per_query_limit = min(_MAX_SEARCH_LIMIT, max(40, target * 8))
@@ -184,23 +187,55 @@ async def run_telethon_stage(
     min_sub = merged.get("min_subscribers")
     max_sub = merged.get("max_subscribers")
     new_only = merged.get("channel_type") == "new_only"
+    if username_query or live_mode == "saved":
+        # Для точечного username-поиска и актуализации выбранных сохранённых каналов
+        # не отбрасываем уже существующие каналы: требуется update-or-insert.
+        new_only = False
 
     seen_hit_ids: set[int] = set()
     ordered_hits: list[TelegramSearchHit] = []
-    for qv in variants:
-        if len(ordered_hits) >= _MAX_UNIQUE_CANDIDATES:
-            break
-        hits = await telegram.search_public_channels(qv, limit=per_query_limit, broadcast_only=True)
-        diagnostics["queries_tried"].append({"q": qv, "hits": len(hits)})
-        diagnostics["raw_hits"] += len(hits)
-        for h in hits:
-            tid = int(h.telegram_channel_id)
-            if tid in seen_hit_ids:
-                continue
-            seen_hit_ids.add(tid)
-            ordered_hits.append(h)
-        if len(ordered_hits) >= hit_cap:
-            break
+    if username_query:
+        ident = username_query.lstrip("@")
+        info = await telegram.get_channel_info(ident)
+        ordered_hits.append(
+            TelegramSearchHit(
+                telegram_channel_id=int(info.telegram_channel_id),
+                username=info.username,
+                title=info.title,
+                is_broadcast=True,
+            )
+        )
+        diagnostics["queries_tried"].append({"q": f"@{ident}", "hits": 1, "mode": "username"})
+    elif live_mode == "saved" and selected_channel_ids:
+        async with AsyncSessionLocal() as session:
+            repo = ChannelRepository(session)
+            rows = await repo.list_by_ids_ordered(selected_channel_ids)
+        for row in rows:
+            ordered_hits.append(
+                TelegramSearchHit(
+                    telegram_channel_id=int(row.telegram_id),
+                    username=row.username,
+                    title=row.title,
+                    is_broadcast=True,
+                )
+            )
+        target = min(20, max(1, len(ordered_hits)))
+        diagnostics["queries_tried"].append({"q": "selected_saved_channels", "hits": len(ordered_hits), "mode": "saved"})
+    else:
+        for qv in variants:
+            if len(ordered_hits) >= _MAX_UNIQUE_CANDIDATES:
+                break
+            hits = await telegram.search_public_channels(qv, limit=per_query_limit, broadcast_only=True)
+            diagnostics["queries_tried"].append({"q": qv, "hits": len(hits)})
+            diagnostics["raw_hits"] += len(hits)
+            for h in hits:
+                tid = int(h.telegram_channel_id)
+                if tid in seen_hit_ids:
+                    continue
+                seen_hit_ids.add(tid)
+                ordered_hits.append(h)
+            if len(ordered_hits) >= hit_cap:
+                break
 
     diagnostics["unique_candidates"] = len(ordered_hits)
     logger.info(

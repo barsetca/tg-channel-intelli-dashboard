@@ -111,6 +111,14 @@ class ChannelRepository(BaseRepository[Channel]):
         )
         return result.scalar_one_or_none()
 
+    async def list_by_ids_ordered(self, ids: Sequence[int]) -> list[Channel]:
+        wanted = [int(x) for x in ids if int(x) > 0]
+        if not wanted:
+            return []
+        result = await self._session.execute(select(Channel).where(Channel.id.in_(wanted)))
+        by_id = {int(ch.id): ch for ch in result.scalars().all()}
+        return [by_id[i] for i in wanted if i in by_id]
+
     def _catalog_query_base(
         self,
         *,

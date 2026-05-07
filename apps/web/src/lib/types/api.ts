@@ -7,9 +7,11 @@ export type SearchChannelsRequest = {
   min_subscribers?: number | null;
   max_subscribers?: number | null;
   channel_type?: "new_only" | "all";
+  live_channel_mode?: "new" | "saved";
   language?: string | null;
   region_country?: string | null;
   username_query?: string | null;
+  selected_channel_ids?: number[];
   last_post_from?: string | null;
   last_post_to?: string | null;
   extra_conditions?: string | null;

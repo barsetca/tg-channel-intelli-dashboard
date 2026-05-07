@@ -40,11 +40,14 @@ export default function SearchPage() {
   const [minSub, setMinSub] = useState<number | "">("");
   const [maxSub, setMaxSub] = useState<number | "">("");
   const [channelType, setChannelType] = useState<"new_only" | "all">("all");
+  const [liveChannelMode, setLiveChannelMode] = useState<"new" | "saved">("new");
   const [sortBy, setSortBy] = useState<"subscriber_count" | "last_sync_at">("subscriber_count");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const [language, setLanguage] = useState("ru");
   const [region, setRegion] = useState("");
   const [usernameQuery, setUsernameQuery] = useState("");
+  const [selectedSavedIds, setSelectedSavedIds] = useState<number[]>([]);
+  const [savedSelectionMode, setSavedSelectionMode] = useState(false);
   const [lastPostFrom, setLastPostFrom] = useState("");
   const [lastPostTo, setLastPostTo] = useState("");
   const [extra, setExtra] = useState("");
@@ -71,11 +74,14 @@ export default function SearchPage() {
         minSub?: number | "";
         maxSub?: number | "";
         channelType?: "new_only" | "all";
+        liveChannelMode?: "new" | "saved";
         sortBy?: "subscriber_count" | "last_sync_at";
         sortOrder?: "asc" | "desc";
         language?: string;
         region?: string;
         usernameQuery?: string;
+        selectedSavedIds?: number[];
+        savedSelectionMode?: boolean;
         lastPostFrom?: string;
         lastPostTo?: string;
         extra?: string;
@@ -89,11 +95,14 @@ export default function SearchPage() {
       if (parsed.minSub === "" || typeof parsed.minSub === "number") setMinSub(parsed.minSub);
       if (parsed.maxSub === "" || typeof parsed.maxSub === "number") setMaxSub(parsed.maxSub);
       if (parsed.channelType) setChannelType(parsed.channelType);
+      if (parsed.liveChannelMode) setLiveChannelMode(parsed.liveChannelMode);
       if (parsed.sortBy) setSortBy(parsed.sortBy);
       if (parsed.sortOrder) setSortOrder(parsed.sortOrder);
       if (typeof parsed.language === "string") setLanguage(parsed.language);
       if (typeof parsed.region === "string") setRegion(parsed.region);
       if (typeof parsed.usernameQuery === "string") setUsernameQuery(parsed.usernameQuery);
+      if (Array.isArray(parsed.selectedSavedIds)) setSelectedSavedIds(parsed.selectedSavedIds.map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0));
+      if (typeof parsed.savedSelectionMode === "boolean") setSavedSelectionMode(parsed.savedSelectionMode);
       if (typeof parsed.lastPostFrom === "string") setLastPostFrom(parsed.lastPostFrom);
       if (typeof parsed.lastPostTo === "string") setLastPostTo(parsed.lastPostTo);
       if (typeof parsed.extra === "string") setExtra(parsed.extra);
@@ -119,11 +128,14 @@ export default function SearchPage() {
           minSub,
           maxSub,
           channelType,
+          liveChannelMode,
           sortBy,
           sortOrder,
           language,
           region,
           usernameQuery,
+          selectedSavedIds,
+          savedSelectionMode,
           lastPostFrom,
           lastPostTo,
           extra,
@@ -142,11 +154,14 @@ export default function SearchPage() {
     minSub,
     maxSub,
     channelType,
+    liveChannelMode,
     sortBy,
     sortOrder,
     language,
     region,
     usernameQuery,
+    selectedSavedIds,
+    savedSelectionMode,
     lastPostFrom,
     lastPostTo,
     extra,
@@ -227,20 +242,23 @@ export default function SearchPage() {
 
   const buildSearchBody = useCallback((): SearchChannelsRequest => {
     const isSaved = searchSource === "saved_catalog";
+    const usernamePriority = searchSource === "telegram_live" && usernameQuery.trim().length > 0;
     return {
       topic: topic.trim(),
-      count: isSaved ? (showAllSaved ? null : count) : Math.max(1, Math.min(30, count)),
+      count: isSaved ? (showAllSaved ? null : count) : Math.max(1, Math.min(15, count)),
       min_subscribers: isSaved ? (minSub === "" ? null : minSub) : null,
       max_subscribers: isSaved ? (maxSub === "" ? null : maxSub) : null,
       channel_type: channelType,
+      live_channel_mode: isSaved ? "new" : liveChannelMode,
       sort_by: isSaved ? sortBy : "subscriber_count",
       sort_order: isSaved ? sortOrder : "desc",
-      language: language.trim() || null,
-      region_country: region.trim() || null,
-      username_query: isSaved ? usernameQuery.trim() || null : null,
+      language: usernamePriority ? "ru" : language.trim() || null,
+      region_country: usernamePriority ? null : region.trim() || null,
+      username_query: usernameQuery.trim() || null,
+      selected_channel_ids: searchSource === "telegram_live" && liveChannelMode === "saved" ? selectedSavedIds : [],
       last_post_from: isSaved ? lastPostFrom || null : null,
       last_post_to: isSaved ? lastPostTo || null : null,
-      extra_conditions: extra.trim() || null,
+      extra_conditions: usernamePriority ? null : extra.trim() || null,
       search_source: searchSource,
     };
   }, [
@@ -250,11 +268,13 @@ export default function SearchPage() {
     minSub,
     maxSub,
     channelType,
+    liveChannelMode,
     sortBy,
     sortOrder,
     language,
     region,
     usernameQuery,
+    selectedSavedIds,
     lastPostFrom,
     lastPostTo,
     extra,
@@ -314,6 +334,19 @@ export default function SearchPage() {
     setData(null);
     try {
       if (searchSource === "telegram_live") {
+        if (liveChannelMode === "saved" && selectedSavedIds.length === 0) {
+          const pickRes = await searchChannels({
+            ...buildSearchBody(),
+            search_source: "saved_catalog",
+            count: null,
+            channel_type: "all",
+          });
+          setSavedSelectionMode(true);
+          setData(pickRes);
+          setShowManualReviewModal(Boolean(pickRes.manual_review?.needs_review));
+          setShowNoResultsModal(!pickRes.channels.length && !pickRes.manual_review?.needs_review);
+          return;
+        }
         const status = await fetchTelegramStatus();
         if (!status.session_ready) {
           setLoading(false);
@@ -332,10 +365,12 @@ export default function SearchPage() {
           return;
         }
         await runSearchRequest();
+        setSavedSelectionMode(false);
         return;
       }
 
       await runSearchRequest();
+      setSavedSelectionMode(false);
     } catch (err) {
       setError(err instanceof ApiError ? `${err.status}: ${err.message}` : "Request failed");
     } finally {
@@ -465,7 +500,7 @@ export default function SearchPage() {
                 id="count"
                 type="number"
                 min={1}
-                max={30}
+                max={15}
                 value={count}
                 onChange={(e) => setCount(Number(e.target.value) || 1)}
               />
@@ -475,12 +510,29 @@ export default function SearchPage() {
             <Label htmlFor="ctype">Тип каналов</Label>
             <select
               id="ctype"
-              value={channelType}
-              onChange={(e) => setChannelType(e.target.value as "new_only" | "all")}
+              value={searchSource === "saved_catalog" ? channelType : liveChannelMode}
+              onChange={(e) => {
+                if (searchSource === "saved_catalog") {
+                  setChannelType(e.target.value as "new_only" | "all");
+                } else {
+                  setLiveChannelMode(e.target.value as "new" | "saved");
+                  setSavedSelectionMode(false);
+                  setSelectedSavedIds([]);
+                }
+              }}
               className={selectClass}
             >
-              <option value="all">Все</option>
-              <option value="new_only">Показать последние</option>
+              {searchSource === "saved_catalog" ? (
+                <>
+                  <option value="all">Все</option>
+                  <option value="new_only">Показать последние</option>
+                </>
+              ) : (
+                <>
+                  <option value="saved">Сохраненные</option>
+                  <option value="new">Новые</option>
+                </>
+              )}
             </select>
           </div>
           {searchSource === "saved_catalog" ? (
@@ -545,7 +597,7 @@ export default function SearchPage() {
             <Label htmlFor="region">Регион / страна</Label>
             <Input id="region" placeholder="необязательно" value={region} onChange={(e) => setRegion(e.target.value)} />
           </div>
-          {searchSource === "saved_catalog" ? (
+          {searchSource === "saved_catalog" || searchSource === "telegram_live" ? (
             <div className="sm:col-span-2 grid gap-4 md:grid-cols-3">
               <div>
                 <Label htmlFor="lastPostFrom">Последний пост от</Label>
@@ -569,11 +621,23 @@ export default function SearchPage() {
                 <Label htmlFor="usernameQuery">Username канала</Label>
                 <Input
                   id="usernameQuery"
-                  placeholder="@username или часть"
+                  placeholder="@username или https://t.me/channel"
                   value={usernameQuery}
                   onChange={(e) => setUsernameQuery(e.target.value)}
                 />
               </div>
+            </div>
+          ) : null}
+          {searchSource === "telegram_live" && usernameQuery.trim() ? (
+            <div className="sm:col-span-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+              Поиск по username активен: остальные фильтры (кроме «Тема / ниша») будут проигнорированы. Язык установлен в
+              `ru` по умолчанию.
+            </div>
+          ) : null}
+          {searchSource === "telegram_live" && liveChannelMode === "saved" ? (
+            <div className="sm:col-span-2 rounded-xl border border-zinc-200 bg-zinc-50 p-3 text-sm text-zinc-700">
+              Сначала нажмите «Найти каналы», выберите от 1 до 20 сохранённых каналов и нажмите «Найти каналы» ещё раз для
+              актуализации данных в Telegram.
             </div>
           ) : null}
           <div className="sm:col-span-2">
@@ -690,8 +754,32 @@ export default function SearchPage() {
       {data?.channels?.length ? (
         <div className="space-y-3">
           <h2 className="text-lg font-medium text-zinc-900">Результаты ({data.channels.length})</h2>
-          <p className="text-sm text-zinc-600">Нажмите на строку, чтобы открыть карточку канала.</p>
-          <ChannelSearchResultList channels={data.channels} onDelete={onDeleteChannel} />
+          <p className="text-sm text-zinc-600">
+            {savedSelectionMode
+              ? "Выберите каналы для актуализации. Можно выбрать до 20."
+              : "Нажмите на строку, чтобы открыть карточку канала."}
+          </p>
+          <ChannelSearchResultList
+            channels={data.channels}
+            onDelete={savedSelectionMode ? undefined : onDeleteChannel}
+            selectable={savedSelectionMode}
+            selectedIds={selectedSavedIds}
+            onToggleSelect={(channelId, checked) => {
+              setSelectedSavedIds((prev) => {
+                if (checked) {
+                  if (prev.includes(channelId) || prev.length >= 20) return prev;
+                  return [...prev, channelId];
+                }
+                return prev.filter((x) => x !== channelId);
+              });
+            }}
+          />
+          {savedSelectionMode ? (
+            <p className="text-sm text-zinc-700">
+              Выбрано: <strong>{selectedSavedIds.length}</strong> / 20. При следующем запуске поиска будут обновляться
+              именно выбранные каналы (приоритет над полем «Сколько каналов»).
+            </p>
+          ) : null}
         </div>
       ) : null}
 
