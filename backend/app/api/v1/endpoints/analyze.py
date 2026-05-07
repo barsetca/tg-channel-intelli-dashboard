@@ -3,7 +3,14 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.api.deps import get_intelligence_service
-from app.schemas.intelligence import AnalyzeChannelRequest, AnalyzeChannelResponse
+from app.integrations.telethon.exceptions import TelegramTelethonError
+from app.schemas.intelligence import (
+    AnalyzeChannelByHandleRequest,
+    AnalyzeChannelRequest,
+    AnalyzeChannelResponse,
+    SummarizePostsByHandleRequest,
+    SummarizePostsResponse,
+)
 from app.services.intelligence_service import IntelligenceService
 
 router = APIRouter()
@@ -11,6 +18,38 @@ router = APIRouter()
 _DEFAULT_ANALYZE_INTENT = (
     "Проанализируй канал: тематика, стиль, риски и рекомендации для рекламодателя."
 )
+
+
+@router.post(
+    "/by-handle",
+    response_model=AnalyzeChannelResponse,
+    summary="Анализировать канал по ссылке/username",
+    description=(
+        "Сценарий 2: проверяет доступность канала через Telethon, подтягивает последние посты, "
+        "запускает AI-анализ и сохраняет результат в таблицу `analyses`."
+    ),
+)
+async def analyze_channel_by_handle(
+    body: AnalyzeChannelByHandleRequest,
+    svc: IntelligenceService = Depends(get_intelligence_service),
+) -> AnalyzeChannelResponse:
+    return await svc.run_channel_analysis_by_handle(body=body)
+
+
+@router.post(
+    "/by-handle/summarize",
+    response_model=SummarizePostsResponse,
+    summary="Сводка последних постов по ссылке/username",
+    description="Сценарий 3: получает посты через Telethon, строит постовые и оконную сводки, сохраняет в Qdrant.",
+)
+async def summarize_channel_by_handle(
+    body: SummarizePostsByHandleRequest,
+    svc: IntelligenceService = Depends(get_intelligence_service),
+) -> SummarizePostsResponse:
+    try:
+        return await svc.summarize_recent_posts_by_handle(body=body)
+    except TelegramTelethonError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
 
 @router.post(

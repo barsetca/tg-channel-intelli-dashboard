@@ -14,7 +14,7 @@ router = APIRouter()
     response_model=CompareChannelsResponse,
     summary="Сравнить каналы",
     description=(
-        "2–5 каналов: метрики из БД; текстовые выводы — шаблон (позже через LLM)."
+        "2–3 каналов: сравнение за окно 30 дней с добором данных через Telethon и AI-выводами."
     ),
     responses={404: {"description": "Один из channel_ids не найден"}},
 )

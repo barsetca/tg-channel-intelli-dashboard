@@ -53,6 +53,8 @@ class Channel(Base, TimestampMixin):
 
     # Тематика / теги (сценарий 1 карточка + анализ)
     primary_topic: Mapped[str | None] = mapped_column(String(512), nullable=True, index=True)
+    # Исходная строка из формы Telegram live-поиска (для приоритетного поиска в saved catalog).
+    topic_search: Mapped[str | None] = mapped_column(String(512), nullable=True, index=True)
     topics_json: Mapped[dict | list | None] = mapped_column(JSON, nullable=True)
 
     # Контакты канала если известны (бот, email в описании не парсится автоматически — JSON вручную/пайплайн)

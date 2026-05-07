@@ -12,7 +12,9 @@ from qdrant_client.models import (
     Filter,
     HasIdCondition,
     MatchValue,
+    PayloadSchemaType,
     PointStruct,
+    Record,
     ScoredPoint,
     VectorParams,
 )
@@ -43,11 +45,30 @@ class QdrantStore:
     def collection_name(self) -> str:
         return self._collection
 
+    async def collection_exists(self, collection_name: str) -> bool:
+        return await self._client.collection_exists(collection_name)
+
+    async def collection_points_count(self, collection_name: str) -> int | None:
+        try:
+            info = await self._client.get_collection(collection_name)
+        except Exception:
+            return None
+        count = getattr(info, "points_count", None)
+        return int(count) if count is not None else None
+
     async def ensure_collection(self, vector_size: int) -> None:
         exists = await self._client.collection_exists(self._collection)
         if not exists:
             await self._client.create_collection(
                 collection_name=self._collection,
+                vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+            )
+
+    async def ensure_collection_named(self, collection_name: str, vector_size: int) -> None:
+        exists = await self._client.collection_exists(collection_name)
+        if not exists:
+            await self._client.create_collection(
+                collection_name=collection_name,
                 vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
             )
 
@@ -67,6 +88,37 @@ class QdrantStore:
         ]
         await self._client.upsert(collection_name=self._collection, points=points)
 
+    async def upsert_vectors_to(
+        self,
+        *,
+        collection_name: str,
+        ids: Sequence[int | str],
+        vectors: list[list[float]],
+        payloads: list[dict[str, Any]] | None = None,
+    ) -> None:
+        points = [
+            PointStruct(
+                id=ids[i],
+                vector=vectors[i],
+                payload=(payloads[i] if payloads else {}),
+            )
+            for i in range(len(ids))
+        ]
+        await self._client.upsert(collection_name=collection_name, points=points)
+
+    async def ensure_payload_index(
+        self,
+        *,
+        collection_name: str,
+        field_name: str,
+        field_type: PayloadSchemaType | str,
+    ) -> None:
+        await self._client.create_payload_index(
+            collection_name=collection_name,
+            field_name=field_name,
+            field_schema=field_type,
+        )
+
     async def search(
         self,
         *,
@@ -82,6 +134,40 @@ class QdrantStore:
             with_payload=True,
         )
         return list(res.points)
+
+    async def search_in_collection(
+        self,
+        *,
+        collection_name: str,
+        query_vector: list[float],
+        limit: int,
+        query_filter: Filter | None = None,
+    ) -> list[ScoredPoint]:
+        res = await self._client.query_points(
+            collection_name=collection_name,
+            query=query_vector,
+            query_filter=query_filter,
+            limit=limit,
+            with_payload=True,
+        )
+        return list(res.points)
+
+    async def scroll_in_collection(
+        self,
+        *,
+        collection_name: str,
+        limit: int,
+        query_filter: Filter | None = None,
+        with_vectors: bool = False,
+    ) -> list[Record]:
+        points, _ = await self._client.scroll(
+            collection_name=collection_name,
+            scroll_filter=query_filter,
+            limit=limit,
+            with_payload=True,
+            with_vectors=with_vectors,
+        )
+        return list(points)
 
     async def retrieve_vector(self, point_id: str) -> list[float]:
         res = await self._client.retrieve(

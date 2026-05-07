@@ -10,19 +10,42 @@ from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.database import engine
 from app.integrations.telethon import TelethonUserSessionService
+from app.integrations.telethon.interactive_auth import TelegramInteractiveAuthFlows
+from app.orchestration.coordinator import OrchestrationCoordinator
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    coordinator = OrchestrationCoordinator(
+        settings=settings,
+        get_telegram=lambda: getattr(app.state, "telegram_service", None),
+    )
+    await coordinator.start()
+    app.state.orchestration_coordinator = coordinator
+    app.state.telegram_auth_flows = TelegramInteractiveAuthFlows()
+
     tg = TelethonUserSessionService(settings)
-    telegram_ok = await tg.startup_for_fastapi()
-    app.state.telegram_service = tg if telegram_ok else None
+    telegram_ok, telegram_fail = await tg.startup_for_fastapi()
+    if telegram_ok:
+        app.state.telegram_service = tg
+        app.state.telegram_startup_failure = None
+    else:
+        try:
+            await tg.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+        app.state.telegram_service = None
+        app.state.telegram_startup_failure = telegram_fail
     try:
         yield
     finally:
         svc = app.state.telegram_service
         if svc is not None:
             await svc.disconnect()
+        flows = getattr(app.state, "telegram_auth_flows", None)
+        if flows is not None:
+            await flows.dispose_all()
+        await coordinator.stop()
         await engine.dispose()
 
 

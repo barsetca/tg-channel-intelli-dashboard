@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 from app.ai.schemas.context import ContextBundle, PostSnippet
 from app.ai.schemas.plan import Plan
+from app.datetime_compat import ensure_utc_aware
 from app.services.channel_metrics import PostMetricRow, compute_channel_metrics
 
 
@@ -30,9 +31,7 @@ class ChannelPipelineInput:
 
 
 def _format_post(p: PostSnippet) -> str:
-    at = p.posted_at
-    if at.tzinfo is None:
-        at = at.replace(tzinfo=timezone.utc)
+    at = ensure_utc_aware(p.posted_at)
     line = f"[{at.date()}] "
     body = (p.text or "").strip()
     return line + (body if body else "(пустой пост)")
@@ -56,7 +55,7 @@ def build_context_bundle(inp: ChannelPipelineInput) -> ContextBundle:
     """Склеивает посты, обрезает по `max_context_chars`, считает data_sufficiency."""
     parts: list[str] = []
     total = 0
-    for p in sorted(inp.posts, key=lambda x: x.posted_at):
+    for p in sorted(inp.posts, key=lambda x: ensure_utc_aware(x.posted_at)):
         chunk = _format_post(p) + "\n"
         if total + len(chunk) > inp.max_context_chars:
             parts.append("… [контекст усечён по лимиту символов]")
@@ -70,10 +69,9 @@ def build_context_bundle(inp: ChannelPipelineInput) -> ContextBundle:
     metrics_text: str | None = None
     rows = []
     for p in inp.posts:
-        at = p.posted_at
-        if at.tzinfo is None:
-            at = at.replace(tzinfo=timezone.utc)
-        rows.append(PostMetricRow(posted_at=at, views=p.views, forwards=None))
+        rows.append(
+            PostMetricRow(posted_at=ensure_utc_aware(p.posted_at), views=p.views, forwards=None),
+        )
     if rows:
         snap = compute_channel_metrics(rows, now_utc=datetime.now(timezone.utc))
         ep = snap.engagement_proxy

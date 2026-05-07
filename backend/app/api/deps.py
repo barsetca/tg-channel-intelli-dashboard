@@ -35,10 +35,21 @@ def get_channel_service(
 
 
 def get_intelligence_service(
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> IntelligenceService:
     """Сервис сценариев intelligence (поиск, анализ, сравнение, экспорт)."""
-    return IntelligenceService(session)
+    coordinator = getattr(request.app.state, "orchestration_coordinator", None)
+    telegram = getattr(request.app.state, "telegram_service", None)
+    telethon_ok = getattr(request.app.state, "telegram_service", None) is not None
+    telethon_startup_failure = getattr(request.app.state, "telegram_startup_failure", None)
+    return IntelligenceService(
+        session,
+        coordinator=coordinator,
+        telegram=telegram,
+        telethon_live_available=telethon_ok,
+        telethon_startup_failure=telethon_startup_failure,
+    )
 
 
 async def get_vector_service() -> AsyncGenerator[VectorService, None]:
@@ -69,7 +80,7 @@ def get_telethon_user_session_service_dep(request: Request) -> TelethonUserSessi
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=(
                 "Интеграция Telegram (пользовательская сессия) недоступна: "
-                "проверьте TELEGRAM_API_ID/HASH и наличие авторизованного .session файла."
+                "проверьте TELEGRAM_API_ID/HASH, TELEGRAM_SESSION (StringSession) или авторизованный .session файл."
             ),
         )
     return cast(TelethonUserSessionService, svc)

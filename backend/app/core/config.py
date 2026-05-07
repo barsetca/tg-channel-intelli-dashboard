@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,6 +27,12 @@ class Settings(BaseSettings):
 
     telegram_api_id: int | None = None
     telegram_api_hash: str | None = None
+    # Строка сессии Telethon (StringSession). Имеет меньший приоритет, чем TELEGRAM_SESSION в окружении в рантайме.
+    telegram_session: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TELEGRAM_SESSION", "telegram_session"),
+        description="StringSession; если пусто — используется файл в telegram_session_dir",
+    )
     telegram_session_name: str = "telegram_session"
     # Директория для TelegramClient (*.session относительно cwd backend или абсолютный путь)
     telegram_session_dir: str = "data/sessions"
@@ -34,6 +40,11 @@ class Settings(BaseSettings):
     telegram_flood_max_wait_seconds: int = 60
     # Число повторов операции после FloodWait (не считая первый вызов)
     telegram_flood_retry_attempts: int = 2
+    # Разрешить HTTP-эндпоинты первого входа (телефон → код → 2FA). В production при false — только готовая сессия.
+    telegram_interactive_login_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("TELEGRAM_INTERACTIVE_LOGIN", "telegram_interactive_login_enabled"),
+    )
 
     openai_api_key: str | None = None
     openai_embedding_model: str = "text-embedding-3-small"

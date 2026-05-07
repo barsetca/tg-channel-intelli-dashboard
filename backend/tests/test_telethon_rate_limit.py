@@ -86,3 +86,21 @@ async def test_non_rate_error_propagates(monkeypatch: pytest.MonkeyPatch) -> Non
             cap_sleep_seconds=10,
             operation_label="t",
         )
+
+
+@pytest.mark.asyncio
+async def test_no_retry_budget_does_not_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeper = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleeper)
+
+    async def always_flood() -> str:
+        raise FloodWaitError(None, 60)
+
+    with pytest.raises(TelegramTelethonError):
+        await run_with_optional_flood_retry(
+            always_flood,
+            max_additional_attempts=0,
+            cap_sleep_seconds=60,
+            operation_label="t",
+        )
+    sleeper.assert_not_awaited()

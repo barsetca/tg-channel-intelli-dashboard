@@ -33,15 +33,25 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 | Метод | Путь | Сценарий (см. `context/user_scenario.txt`) |
 |-------|------|---------------------------------------------|
-| POST | `/search-channels` | 1 — поиск по каталогу в БД; 8 — `manual_review` при слишком общем запросе |
+| POST | `/search-channels` | 1 — поиск: `search_source` = `saved_catalog` (SQLite) или `telegram_live` (фоновый job); 8 — `manual_review`; ответ может содержать `background_job` |
+| — | Оркестрация | `app/orchestration/coordinator.py` — очередь Telethon→SQLite→metrics→AI→vector (см. docstring модуля) |
+| POST | `/telegram/auth/start`, `/auth/code`, `/auth/password` | Первый вход Telethon из клиента приложения (телефон → код → 2FA); см. `docs/TELEGRAM_TELETHON.md` |
 | GET | `/channel/{id}` | 2 — карточка канала |
 | POST | `/channel/{id}/summarize` | 3 — сводка последних постов (LLM) |
 | POST | `/analyze/{id}` | 2 — запуск `ChannelAnalysisPipeline`, запись в `analyses` |
+| POST | `/analyze/by-handle` | 2 — анализ канала по ссылке/username (`@name`, `t.me/...`) с проверкой доступа через Telethon |
+| GET | `/analyses` | 2 — список сохранённых отчётов (`analyses` с `channel_id`), опционально `?channel_id=` |
+| GET | `/analyses/{analysis_id}` | 2 — повторное чтение сохранённого отчёта |
 | POST | `/semantic-search` | 4 — семантический поиск (Qdrant + эмбеддинг запроса) |
 | GET | `/recommendations/{id}` | 6 — похожие каналы (профиль → поиск по постам) |
 | POST | `/channels/compare` | 5 — сравнение метрик 2–5 каналов |
 | GET | `/export?format=json` или `format=csv` | 7 — выгрузка каналов из БД |
-| GET/POST | `/channels`, `/health` | CRUD каналов (MVP) и healthcheck |
+| GET/POST/DELETE | `/channels`, `/channels/{channel_id}`, `/health` | CRUD каналов (MVP; DELETE удаляет канал из каталога) и healthcheck |
+
+### Различия форм поиска
+
+- `saved_catalog`: поддерживает `count=null` (режим "Показать все"), фильтр по подписчикам и приоритетный поиск по `channels.topic_search`.
+- `telegram_live`: принимает `count` в диапазоне `1..100`, фильтр `min/max_subscribers` отключён.
 
 Обработка ошибок: `HTTPException` для 404/503; глобально зарегистрированы `PipelineValidationBlockedError` → **422** и `PipelineError` → **502** (`app/api/exception_handlers.py`).
 
