@@ -8,6 +8,7 @@ import {
   deleteChannel,
   fetchOrchestrationJobStatus,
   fetchTelegramStatus,
+  getSearchTopicOptions,
   searchChannels,
 } from "@/lib/api-client";
 import type {
@@ -35,6 +36,8 @@ const DISMISSED_COMPLETED_JOB_KEY = "tgci:dismissed-completed-job-id:v1";
 export default function SearchPage() {
   const [searchSource, setSearchSource] = useState<"saved_catalog" | "telegram_live">("saved_catalog");
   const [topic, setTopic] = useState("investing & personal finance");
+  const [savedTopic, setSavedTopic] = useState("all");
+  const [savedTopicOptions, setSavedTopicOptions] = useState<string[]>([]);
   const [count, setCount] = useState(15);
   const [showAllSaved, setShowAllSaved] = useState(false);
   const [minSub, setMinSub] = useState<number | "">("");
@@ -69,6 +72,7 @@ export default function SearchPage() {
       const parsed = JSON.parse(raw) as {
         searchSource?: "saved_catalog" | "telegram_live";
         topic?: string;
+        savedTopic?: string;
         count?: number;
         showAllSaved?: boolean;
         minSub?: number | "";
@@ -90,6 +94,7 @@ export default function SearchPage() {
       };
       if (parsed.searchSource) setSearchSource(parsed.searchSource);
       if (typeof parsed.topic === "string") setTopic(parsed.topic);
+      if (typeof parsed.savedTopic === "string") setSavedTopic(parsed.savedTopic);
       if (typeof parsed.count === "number") setCount(parsed.count);
       if (typeof parsed.showAllSaved === "boolean") setShowAllSaved(parsed.showAllSaved);
       if (parsed.minSub === "" || typeof parsed.minSub === "number") setMinSub(parsed.minSub);
@@ -123,6 +128,7 @@ export default function SearchPage() {
         JSON.stringify({
           searchSource,
           topic,
+          savedTopic,
           count,
           showAllSaved,
           minSub,
@@ -149,6 +155,7 @@ export default function SearchPage() {
   }, [
     searchSource,
     topic,
+    savedTopic,
     count,
     showAllSaved,
     minSub,
@@ -168,6 +175,22 @@ export default function SearchPage() {
     data,
     trackedJob,
   ]);
+
+  useEffect(() => {
+    if (searchSource !== "saved_catalog") return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await getSearchTopicOptions();
+        if (!cancelled) setSavedTopicOptions(res.items);
+      } catch {
+        if (!cancelled) setSavedTopicOptions([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [searchSource]);
 
   useEffect(() => {
     const bgJob = data?.background_job;
@@ -244,7 +267,12 @@ export default function SearchPage() {
     const isSaved = searchSource === "saved_catalog";
     const usernamePriority = searchSource === "telegram_live" && usernameQuery.trim().length > 0;
     return {
-      topic: topic.trim(),
+      topic:
+        searchSource === "saved_catalog"
+          ? savedTopic === "all"
+            ? "all"
+            : savedTopic
+          : topic.trim(),
       count: isSaved ? (showAllSaved ? null : count) : Math.max(1, Math.min(15, count)),
       min_subscribers: isSaved ? (minSub === "" ? null : minSub) : null,
       max_subscribers: isSaved ? (maxSub === "" ? null : maxSub) : null,
@@ -263,6 +291,7 @@ export default function SearchPage() {
     };
   }, [
     topic,
+    savedTopic,
     count,
     showAllSaved,
     minSub,
@@ -472,7 +501,18 @@ export default function SearchPage() {
           </div>
           <div className="sm:col-span-2">
             <Label htmlFor="topic">Тема / ниша</Label>
-            <Input id="topic" value={topic} onChange={(e) => setTopic(e.target.value)} required />
+            {searchSource === "saved_catalog" ? (
+              <select id="topic" value={savedTopic} onChange={(e) => setSavedTopic(e.target.value)} className={selectClass}>
+                <option value="all">Все</option>
+                {savedTopicOptions.map((opt) => (
+                  <option key={opt} value={opt}>
+                    {opt}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <Input id="topic" value={topic} onChange={(e) => setTopic(e.target.value)} required />
+            )}
           </div>
           <div>
             <Label htmlFor="count">Сколько каналов</Label>

@@ -14,7 +14,8 @@ class Settings(BaseSettings):
     )
 
     environment: Literal["development", "staging", "production"] = "development"
-    log_level: str = "INFO"
+    # В `.env`: LOG_LEVEL (строка имени уровня logging: DEBUG, INFO, WARNING…).
+    log_level: str = Field(default="INFO", validation_alias=AliasChoices("LOG_LEVEL", "log_level"))
 
     backend_host: str = "0.0.0.0"
     backend_port: int = 8000

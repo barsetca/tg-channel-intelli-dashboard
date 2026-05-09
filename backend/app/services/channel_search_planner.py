@@ -20,6 +20,11 @@ from app.core.config import Settings, get_settings
 logger = logging.getLogger(__name__)
 
 
+def _preview(text: str | None, *, max_len: int = 140) -> str:
+    s = (text or "").replace("\n", " ").strip()
+    return s if len(s) <= max_len else f"{s[: max_len - 1]}…"
+
+
 def _fallback_planner(user: dict[str, Any]) -> SearchPlannerOutput:
     topic = str(user.get("topic", "")).strip()
     return SearchPlannerOutput(
@@ -116,7 +121,14 @@ async def plan_channel_search(settings: Settings, user_payload: dict[str, Any]) 
         ),
     ]
     try:
-        return await client.parse_structured(messages=messages, response_format=SearchPlannerOutput)
+        out = await client.parse_structured(messages=messages, response_format=SearchPlannerOutput)
+        logger.info(
+            "channel_search_planner LLM ok confidence=%s search_topic=%r count=%s",
+            out.confidence,
+            _preview(out.search_topic),
+            out.count,
+        )
+        return out
     except PipelineOpenAIError as exc:
         logger.warning("channel_search_planner: OpenAI недоступен (%s) — fallback", exc)
         return _fallback_planner(user_payload)

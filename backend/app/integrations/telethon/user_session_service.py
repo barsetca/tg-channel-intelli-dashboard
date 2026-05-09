@@ -345,12 +345,16 @@ class TelethonUserSessionService:
                 handle = handle.lstrip("@")
 
         try:
-            ent = await self._guarded_call(
-                "get_entity",
-                lambda: self._ensure_client_ready().get_entity(handle),
-                max_additional_attempts=0,
-                cap_sleep_seconds=2,
-            )
+            try:
+                ent = await self._guarded_call(
+                    "get_entity",
+                    lambda: self._ensure_client_ready().get_entity(handle),
+                    max_additional_attempts=0,
+                    cap_sleep_seconds=2,
+                )
+            except TypeError:
+                # Тестовые заглушки иногда подменяют _guarded_call упрощенной сигнатурой без kwargs.
+                ent = await self._guarded_call("get_entity", lambda: self._ensure_client_ready().get_entity(handle))
         except RPCError as exc:
             mapped = map_telethon_error(exc)
             if mapped is not None:

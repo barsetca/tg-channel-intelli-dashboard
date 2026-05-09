@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from app.api.deps import get_intelligence_service, get_vector_service
 from app.main import app
 from app.schemas.intelligence import (
+    AIPlanAndCollectResponse,
     AnalyzeChannelResponse,
     ManualReviewFlags,
     SearchChannelsRequest,
@@ -138,6 +139,16 @@ class _StubIntelligenceService:
     async def compare_channels(self, body: Any) -> Any:
         return None
 
+    async def plan_and_collect_adapter(self, body: Any) -> AIPlanAndCollectResponse:
+        _ = body
+        return AIPlanAndCollectResponse(
+            plan_steps=["step1", "step2"],
+            api_url="/api/v1/search-channels",
+            fields_to_keep=["title", "username"],
+            confidence="medium",
+            needs_review=False,
+        )
+
     async def export_channels_payload(self, *, limit: int = 500) -> list[dict[str, Any]]:
         return [{"id": 1, "telegram_id": 10, "username": "x", "title": "T", "description": None}]
 
@@ -188,6 +199,17 @@ def test_search_channels_returns_manual_review(client: TestClient) -> None:
     data = r.json()
     assert data["manual_review"]["needs_review"] is True
     assert data["channels"] == []
+
+
+def test_ai_plan_and_collect_contract(client: TestClient) -> None:
+    r = client.post("/api/v1/ai/plan_and_collect", json={"query": "Найди каналы про нейросети"})
+    assert r.status_code == 200
+    data = r.json()
+    assert isinstance(data["plan_steps"], list) and 1 <= len(data["plan_steps"]) <= 5
+    assert isinstance(data["api_url"], str) and data["api_url"]
+    assert isinstance(data["fields_to_keep"], list)
+    assert data["confidence"] in {"high", "medium", "low"}
+    assert isinstance(data["needs_review"], bool)
 
 
 def test_semantic_search_stub(client: TestClient) -> None:
@@ -337,6 +359,7 @@ def test_openapi_contains_routes() -> None:
     analyses_paths = paths.get("/api/v1/analyses/{analysis_id}", {})
     assert "get" in analyses_paths and "delete" in analyses_paths
     assert "/api/v1/search-channels" in paths
+    assert "/api/v1/ai/plan_and_collect" in paths
     assert "/api/v1/channel/{channel_id}" in paths
     assert "/api/v1/analyze/{channel_id}" in paths
     assert "/api/v1/analyze/by-handle" in paths

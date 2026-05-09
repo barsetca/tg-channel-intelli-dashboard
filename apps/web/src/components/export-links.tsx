@@ -8,8 +8,10 @@ import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 export function ExportLinks() {
   return (
     <Card>
-      <CardTitle>Export catalog</CardTitle>
-      <CardDescription>Download aggregated channel records for external tools (Scenario 7).</CardDescription>
+      <CardTitle>Экспорт каталога каналов</CardTitle>
+      <CardDescription>
+        Скачайте данные сохранённого каталога для внешних инструментов и отчётности (сценарий 7).
+      </CardDescription>
       <div className="mt-4 flex flex-wrap gap-3">
         <a href={exportChannelsUrl("json")} download target="_blank" rel="noreferrer">
           <Button variant="secondary" className="w-full sm:w-auto">

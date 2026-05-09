@@ -114,6 +114,17 @@ export default function SemanticSearchPage() {
         </Alert>
       ) : null}
 
+      {data?.gate_matched_topics?.length ? (
+        <div className="flex flex-wrap items-center gap-2 text-sm text-zinc-600">
+          <span className="font-medium text-zinc-700">Отбор каналов по темам каталога (LLM-gate):</span>
+          {data.gate_matched_topics.map((t) => (
+            <Badge key={t} tone="neutral">
+              {t}
+            </Badge>
+          ))}
+        </div>
+      ) : null}
+
       {data?.synthesis_placeholder ? (
         <Alert variant="info" title="Контекст из оконных сводок">
           {data.synthesis_placeholder}

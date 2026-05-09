@@ -1,0 +1,289 @@
+{
+  "generated_at_utc": "2026-05-07T13:24:11.230829+00:00",
+  "queries_file": "tests_data/queries.jsonl",
+  "db_path": "/home/chernyak/AI_projects/tg-channel-intelli-dashboard/backend/data/app.db",
+  "api_base_url": "http://localhost:8000",
+  "audit_runs_before": 34,
+  "audit_runs_after": 41,
+  "audit_runs_added": 7,
+  "requirement_check": {
+    "audit_runs_total_ge_10": true,
+    "audit_runs_added_ge_10": false,
+    "needs_review_matches_expected": true
+  },
+  "query_results": [
+    {
+      "index": 1,
+      "query": "Найди каналы по теме нейросети за последние 7 дней, язык ru, минимум 5000 подписчиков",
+      "expected_needs_review": false,
+      "actual_needs_review": false,
+      "reason": null,
+      "status_code": 200,
+      "channels_count": 0
+    },
+    {
+      "index": 2,
+      "query": "Найди 15 каналов про AI-автоматизацию маркетинга, регион Россия, отсортируй по подписчикам",
+      "expected_needs_review": false,
+      "actual_needs_review": false,
+      "reason": null,
+      "status_code": 200,
+      "channels_count": 0
+    },
+    {
+      "index": 3,
+      "query": "Подбери каналы про инвестиции в IT-стартапы, только публичные, язык ru",
+      "expected_needs_review": false,
+      "actual_needs_review": false,
+      "reason": null,
+      "status_code": 200,
+      "channels_count": 0
+    },
+    {
+      "index": 4,
+      "query": "Собери каналы по теме Telegram-боты для бизнеса, минимум 1000 подписчиков, без новостных",
+      "expected_needs_review": false,
+      "actual_needs_review": false,
+      "reason": null,
+      "status_code": 200,
+      "channels_count": 0
+    },
+    {
+      "index": 5,
+      "query": "Найди каналы про Python и машинное обучение, последние обновления не старше 30 дней",
+      "expected_needs_review": false,
+      "actual_needs_review": false,
+      "reason": null,
+      "status_code": 200,
+      "channels_count": 0
+    },
+    {
+      "index": 6,
+      "query": "Подбери каналы про автоматизацию продаж, приоритет русскоязычным с регулярным постингом",
+      "expected_needs_review": false,
+      "actual_needs_review": false,
+      "reason": null,
+      "status_code": 200,
+      "channels_count": 1
+    },
+    {
+      "index": 7,
+      "query": "Найди каналы по теме аналитика данных для малого бизнеса, добавь экспорт в CSV",
+      "expected_needs_review": false,
+      "actual_needs_review": false,
+      "reason": null,
+      "status_code": 200,
+      "channels_count": 0
+    },
+    {
+      "index": 8,
+      "query": "Собери самое важное по Telegram-каналам",
+      "expected_needs_review": true,
+      "actual_needs_review": true,
+      "reason": "Запрос двусмысленный: недостаточно критериев для автоматического сбора.",
+      "status_code": 200,
+      "channels_count": 0
+    },
+    {
+      "index": 9,
+      "query": "Покажи лучшие каналы и сделай вывод",
+      "expected_needs_review": true,
+      "actual_needs_review": true,
+      "reason": "Запрос двусмысленный: недостаточно критериев для автоматического сбора.",
+      "status_code": 200,
+      "channels_count": 0
+    },
+    {
+      "index": 10,
+      "query": "Собери закрытую статистику всех конкурентов за год",
+      "expected_needs_review": true,
+      "actual_needs_review": true,
+      "reason": "Запрос требует закрытых или недоступных данных источника.",
+      "status_code": 200,
+      "channels_count": 0
+    }
+  ],
+  "needs_review_mismatches": [],
+  "latest_audit_runs": [
+    {
+      "id": 41,
+      "audit_kind": "channel_discovery",
+      "status": "completed",
+      "quality_gate_json": null,
+      "error_text": null,
+      "result_summary_json": "{\"source\": \"saved_catalog\", \"channels_returned\": 0}",
+      "created_at": "2026-05-07 13:24:11"
+    },
+    {
+      "id": 40,
+      "audit_kind": "channel_discovery",
+      "status": "completed",
+      "quality_gate_json": null,
+      "error_text": null,
+      "result_summary_json": "{\"source\": \"saved_catalog\", \"channels_returned\": 1}",
+      "created_at": "2026-05-07 13:24:08"
+    },
+    {
+      "id": 39,
+      "audit_kind": "channel_discovery",
+      "status": "completed",
+      "quality_gate_json": null,
+      "error_text": null,
+      "result_summary_json": "{\"source\": \"saved_catalog\", \"channels_returned\": 0}",
+      "created_at": "2026-05-07 13:24:06"
+    },
+    {
+      "id": 38,
+      "audit_kind": "channel_discovery",
+      "status": "completed",
+      "quality_gate_json": null,
+      "error_text": null,
+      "result_summary_json": "{\"source\": \"saved_catalog\", \"channels_returned\": 0}",
+      "created_at": "2026-05-07 13:23:58"
+    },
+    {
+      "id": 37,
+      "audit_kind": "channel_discovery",
+      "status": "completed",
+      "quality_gate_json": null,
+      "error_text": null,
+      "result_summary_json": "{\"source\": \"saved_catalog\", \"channels_returned\": 0}",
+      "created_at": "2026-05-07 13:23:57"
+    },
+    {
+      "id": 36,
+      "audit_kind": "channel_discovery",
+      "status": "completed",
+      "quality_gate_json": null,
+      "error_text": null,
+      "result_summary_json": "{\"source\": \"saved_catalog\", \"channels_returned\": 0}",
+      "created_at": "2026-05-07 13:23:54"
+    },
+    {
+      "id": 35,
+      "audit_kind": "channel_discovery",
+      "status": "completed",
+      "quality_gate_json": null,
+      "error_text": null,
+      "result_summary_json": "{\"source\": \"saved_catalog\", \"channels_returned\": 0}",
+      "created_at": "2026-05-07 13:23:53"
+    },
+    {
+      "id": 34,
+      "audit_kind": "channel_discovery",
+      "status": "completed",
+      "quality_gate_json": null,
+      "error_text": null,
+      "result_summary_json": "{\"source\": \"saved_catalog\", \"channels_returned\": 0}",
+      "created_at": "2026-05-07 13:20:36"
+    },
+    {
+      "id": 33,
+      "audit_kind": "channel_discovery",
+      "status": "completed",
+      "quality_gate_json": null,
+      "error_text": null,
+      "result_summary_json": "{\"source\": \"saved_catalog\", \"channels_returned\": 0}",
+      "created_at": "2026-05-07 13:20:34"
+    },
+    {
+      "id": 32,
+      "audit_kind": "channel_discovery",
+      "status": "completed",
+      "quality_gate_json": null,
+      "error_text": null,
+      "result_summary_json": "{\"source\": \"saved_catalog\", \"channels_returned\": 0}",
+      "created_at": "2026-05-07 13:20:33"
+    },
+    {
+      "id": 31,
+      "audit_kind": "channel_discovery",
+      "status": "completed",
+      "quality_gate_json": null,
+      "error_text": null,
+      "result_summary_json": "{\"source\": \"saved_catalog\", \"channels_returned\": 0}",
+      "created_at": "2026-05-07 13:20:31"
+    },
+    {
+      "id": 30,
+      "audit_kind": "channel_discovery",
+      "status": "completed",
+      "quality_gate_json": null,
+      "error_text": null,
+      "result_summary_json": "{\"source\": \"saved_catalog\", \"channels_returned\": 1}",
+      "created_at": "2026-05-07 13:20:29"
+    },
+    {
+      "id": 29,
+      "audit_kind": "channel_discovery",
+      "status": "completed",
+      "quality_gate_json": null,
+      "error_text": null,
+      "result_summary_json": "{\"source\": \"saved_catalog\", \"channels_returned\": 0}",
+      "created_at": "2026-05-07 13:20:27"
+    },
+    {
+      "id": 28,
+      "audit_kind": "channel_discovery",
+      "status": "completed",
+      "quality_gate_json": null,
+      "error_text": null,
+      "result_summary_json": "{\"source\": \"saved_catalog\", \"channels_returned\": 0}",
+      "created_at": "2026-05-07 13:20:25"
+    },
+    {
+      "id": 27,
+      "audit_kind": "channel_discovery",
+      "status": "completed",
+      "quality_gate_json": null,
+      "error_text": null,
+      "result_summary_json": "{\"source\": \"saved_catalog\", \"channels_returned\": 0}",
+      "created_at": "2026-05-07 13:20:24"
+    },
+    {
+      "id": 26,
+      "audit_kind": "channel_discovery",
+      "status": "completed",
+      "quality_gate_json": null,
+      "error_text": null,
+      "result_summary_json": "{\"source\": \"saved_catalog\", \"channels_returned\": 0}",
+      "created_at": "2026-05-07 13:20:22"
+    },
+    {
+      "id": 25,
+      "audit_kind": "channel_discovery",
+      "status": "completed",
+      "quality_gate_json": null,
+      "error_text": null,
+      "result_summary_json": "{\"source\": \"saved_catalog\", \"channels_returned\": 0}",
+      "created_at": "2026-05-07 13:20:19"
+    },
+    {
+      "id": 24,
+      "audit_kind": "channel_discovery",
+      "status": "completed",
+      "quality_gate_json": null,
+      "error_text": null,
+      "result_summary_json": "{\"source\": \"saved_catalog\", \"channels_returned\": 0}",
+      "created_at": "2026-05-07 13:13:23"
+    },
+    {
+      "id": 23,
+      "audit_kind": "channel_discovery",
+      "status": "completed",
+      "quality_gate_json": null,
+      "error_text": null,
+      "result_summary_json": "{\"source\": \"saved_catalog\", \"channels_returned\": 0}",
+      "created_at": "2026-05-07 13:13:21"
+    },
+    {
+      "id": 22,
+      "audit_kind": "channel_discovery",
+      "status": "completed",
+      "quality_gate_json": null,
+      "error_text": null,
+      "result_summary_json": "{\"source\": \"saved_catalog\", \"channels_returned\": 0}",
+      "created_at": "2026-05-07 13:13:19"
+    }
+  ]
+}
