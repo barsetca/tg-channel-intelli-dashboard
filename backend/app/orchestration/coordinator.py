@@ -225,10 +225,28 @@ class OrchestrationCoordinator:
         await discovery_pipeline.run_telethon_stage(self._settings, self._get_telegram(), job)
 
     async def _stage_sqlite_persist(self, job: OrchestrationJob) -> None:
-        from app.core.database import AsyncSessionLocal
+        from pathlib import Path
 
-        async with AsyncSessionLocal() as session:
-            await discovery_pipeline.run_sqlite_persist_stage(session, job)
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        from app.core.database import AsyncSessionLocal, settings as db_settings
+
+        if self._settings.database_url == db_settings.database_url:
+            async with AsyncSessionLocal() as session:
+                await discovery_pipeline.run_sqlite_persist_stage(session, job)
+            return
+
+        # Для изолированных тестов/инстансов: используем БД из settings координатора, а не глобальный engine.
+        if self._settings.database_url.startswith("sqlite+aiosqlite:///"):
+            db_path = Path(self._settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+        engine = create_async_engine(self._settings.database_url, echo=False)
+        session_local = async_sessionmaker(engine, expire_on_commit=False, autoflush=False, autocommit=False)
+        try:
+            async with session_local() as session:
+                await discovery_pipeline.run_sqlite_persist_stage(session, job)
+        finally:
+            await engine.dispose()
 
     async def _stage_metrics(self, job: OrchestrationJob) -> None:
         await discovery_pipeline.run_metrics_stage(self._settings, self._get_telegram(), job)

@@ -77,6 +77,38 @@ export type SearchChannelsResponse = {
   has_more?: boolean;
 };
 
+export type SearchTopicOptionsResponse = {
+  items: string[];
+};
+
+export type DataShowcaseItem = {
+  audit_run_id: number;
+  item_id: number;
+  created_at: string | null;
+  source: string | null;
+  record_json: Record<string, unknown> | unknown[] | null;
+};
+
+export type DataShowcaseResponse = {
+  limit: number;
+  items: DataShowcaseItem[];
+};
+
+export type ManualReviewJournalItem = {
+  source: "audit" | "search" | "analyze" | "semantic";
+  reference_id: number;
+  created_at: string | null;
+  reason: string;
+  status: string | null;
+  details: Record<string, unknown> | unknown[] | null;
+};
+
+export type ManualReviewJournalResponse = {
+  limit: number;
+  source_filter: "all" | "audit" | "search" | "analyze" | "semantic";
+  items: ManualReviewJournalItem[];
+};
+
 export type ChannelDetail = ChannelCard & {
   is_public_accessible: boolean | null;
   sync_status: string | null;
@@ -209,6 +241,7 @@ export type SemanticSearchResponse = {
   }>;
   hits: SemanticSearchHit[];
   synthesis_placeholder: string | null;
+  gate_matched_topics?: string[] | null;
 };
 
 export type SimilarChannelItem = {
@@ -277,6 +310,50 @@ export type CompareChannelsResponse = {
       normalized_score: number;
     };
   }>;
+};
+
+export type ChannelDatasetItem = {
+  id: number;
+  telegram_id: number;
+  username: string | null;
+  title: string | null;
+  description: string | null;
+  topic_search: string | null;
+  created_at: string | null;
+  sync_status: string | null;
+  extra_conditions: string | null;
+};
+
+export type ChannelDatasetListResponse = {
+  total: number;
+  limit: number;
+  offset: number;
+  items: ChannelDatasetItem[];
+};
+
+export type ChannelCollectRequest = {
+  channel_ref?: string | null;
+  topic?: string | null;
+  extra_conditions?: string | null;
+};
+
+export type ChannelCollectResponse = {
+  status: string;
+  message: string;
+  channel_id: number;
+  created_new_channel: boolean;
+  background_job_id: string | null;
+  needs_review: boolean;
+  reason: string | null;
+  hints: string[];
+};
+
+export type ChannelCreateResult = {
+  id: number;
+  username: string | null;
+  sync_status: string | null;
+  already_exists: boolean;
+  message: string;
 };
 
 export type HealthResponse = {

@@ -109,6 +109,22 @@ class ManualReviewFlags(BaseModel):
     hints: list[str] = Field(default_factory=list, description="Рекомендации по уточнению")
 
 
+class AIPlanAndCollectRequest(BaseModel):
+    """Адаптер ТЗ: вход для POST /ai/plan_and_collect."""
+
+    query: str = Field(..., min_length=1, max_length=2000, description="Запрос пользователя")
+
+
+class AIPlanAndCollectResponse(BaseModel):
+    """Адаптер ТЗ: строгий JSON-ответ planning шага."""
+
+    plan_steps: list[str] = Field(default_factory=list, min_length=1, max_length=5)
+    api_url: str
+    fields_to_keep: list[str] = Field(default_factory=list)
+    confidence: Literal["high", "medium", "low"] = "medium"
+    needs_review: bool = False
+
+
 class BackgroundSearchJob(BaseModel):
     """Фоновый поиск в Telegram; каналы появятся в каталоге после ingest."""
 
@@ -162,6 +178,48 @@ class SearchChannelsResponse(BaseModel):
         False,
         description="Есть ли следующая страница результатов для saved_catalog",
     )
+
+
+class SearchTopicOptionsResponse(BaseModel):
+    """Справочник тем/ниш для выпадайки saved_catalog."""
+
+    items: list[str] = Field(default_factory=list)
+
+
+class DataShowcaseItem(BaseModel):
+    """Строка витрины данных (нормализованный snapshot из внешнего источника)."""
+
+    audit_run_id: int
+    item_id: int
+    created_at: datetime | None = None
+    source: str | None = None
+    record_json: dict[str, Any] | list[Any] | None = None
+
+
+class DataShowcaseResponse(BaseModel):
+    """Ответ витрины данных."""
+
+    limit: int
+    items: list[DataShowcaseItem] = Field(default_factory=list)
+
+
+class ManualReviewJournalItem(BaseModel):
+    """Элемент журнала ручной проверки."""
+
+    source: Literal["audit", "search", "analyze", "semantic"]
+    reference_id: int
+    created_at: datetime | None = None
+    reason: str
+    status: str | None = None
+    details: dict[str, Any] | list[Any] | None = None
+
+
+class ManualReviewJournalResponse(BaseModel):
+    """Ответ журнала ручной проверки."""
+
+    limit: int
+    source_filter: Literal["all", "audit", "search", "analyze", "semantic"] = "all"
+    items: list[ManualReviewJournalItem] = Field(default_factory=list)
 
 
 # --- Сценарий 2: детализация и анализ ---
@@ -413,6 +471,10 @@ class SemanticSearchResponse(BaseModel):
     sources: list[SemanticSource] = Field(default_factory=list)
     hits: list[SemanticSearchHit] = Field(default_factory=list)
     synthesis_placeholder: str | None = None
+    gate_matched_topics: list[str] | None = Field(
+        None,
+        description="Темы из LLM-gate, сопоставленные с каталогом; используются для пост-фильтрации выдачи.",
+    )
 
 
 # --- Сценарий 6: похожие каналы ---

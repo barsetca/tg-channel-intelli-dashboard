@@ -1,6 +1,12 @@
 # Метрики Telegram-канала (движок расчёта)
 
-Документ описывает **что** считает модуль `app.services.channel_metrics`, **из каких входных полей** и **какие буквы в формулах** что означают. Реализация — чистые функции в `[compute.py](../app/services/channel_metrics/compute.py)`; типы — `[types.py](../app/services/channel_metrics/types.py)`; маппинг ORM → строки метрик — `[adapters.py](../app/services/channel_metrics/adapters.py)`.
+Документ описывает **что** считает модуль `app.services.channel_metrics`, **из каких входных полей** и какие переменные используются в формулах. Это должно совпадать с реализацией в:
+
+- `[compute.py](../app/services/channel_metrics/compute.py)` — расчёт;
+- `[types.py](../app/services/channel_metrics/types.py)` — `PostMetricRow`, `MetricWeights`, `ChannelMetricsSnapshot`, `ChannelMetricContext`;
+- `[adapters.py](../app/services/channel_metrics/adapters.py)` — маппинг ORM (`Post`, `Channel`) → типы метрик.
+
+Публичный импорт (реэкспорт из пакета): `from app.services.channel_metrics import compute_channel_metrics, PostMetricRow`.
 
 ---
 
@@ -8,196 +14,196 @@
 
 ### 1.1. Одна запись поста: `PostMetricRow`
 
+| Поле        | Тип              | Смысл |
+| ----------- | ---------------- | ----- |
+| `posted_at` | `datetime`       | Время публикации. Если **нет** timezone, в расчётах дата считается **UTC** (`_ensure_aware_utc`). Используется для интервалов и свежести. |
+| `views`     | `int \| None`    | Просмотры поста (**v**, `views`). Пост участвует в **avg_views**, **engagement_proxy** и интервалах **только** если `views is not None` и `views > 0`. |
+| `forwards`  | `int \| None`    | Пересылки (**f**). `None` → при расчёте отношения берётся **0**; отрицательные значения усекаются через `max(int(forwards), 0)`. |
 
-| Поле        | Тип          | Смысл                                                                                                                                                                                                                                                           |
-| ----------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `posted_at` | `datetime`   | Дата и время публикации поста в канале. Желательно с таймзоной (если без — в расчётах считается UTC). Используется для интервалов между постами и для «свежести» последнего поста.                                                                              |
-| `views`     | `int | None` | **Просмотры** поста в Telegram (в коде и формулах ниже обозначается как v или `views`): сколько раз сообщение было показано. `None` или `0` означает «данных нет» — такой пост **не участвует** в среднем по просмотрам и в прокси вовлечённости по просмотрам. |
-| `forwards`  | `int | None` | **Количество пересылок** (репостов) поста в другие чаты (в формулах f или `forwards`). `None` трактуется как **0** пересылок.                                                                                                                                   |
-
-
-Связь с ORM: поля `Post.posted_at`, `Post.views_count`, `Post.forwards_count` → см. `post_row_from_orm` в `adapters.py`.
+Связь с ORM: `Post.posted_at`, `Post.views_count`, `Post.forwards_count` → см. `post_row_from_orm()` в `adapters.py`.
 
 ### 1.2. Контекст канала: `ChannelMetricContext`
 
+| Поле               | Смысл |
+| ------------------ | ----- |
+| `subscriber_count` | Подписчики канала. **В формулах не используется**; попадает в `ChannelMetricsSnapshot.meta["subscriber_count"]`. |
+| `now_utc`          | Референс «сейчас» UTC для компонента свежести в **activity_score** (см. раздел 7). |
 
-| Поле               | Смысл                                                                                                                                                                                                                                  |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `subscriber_count` | Число подписчиков канала (если известно). **Сейчас в формулах метрик не используется**; поле зарезервировано для будущих версий (например, нормализация вовлечённости от размера аудитории). Попадает в `ChannelMetricsSnapshot.meta`. |
-| `now_utc`          | «Текущий момент» в UTC для оценки свежести последнего поста в **activity_score**. Если не задан, в `compute_channel_metrics` берётся `datetime.now(timezone.utc)` (в тестах лучше задавать явно).                                      |
+### 1.3. Настройки весов: `MetricWeights`
 
+Все поля необязательны; при вызове функций без аргумента создаётся `MetricWeights()` с константами ниже.
 
-### 1.3. Настройки весов и порогов: `MetricWeights`
-
-Все поля необязательны при вызове: по умолчанию создаётся объект с фиксированными константами.
-
-
-| Переменная                       | Значение по умолчанию | Роль в формулах                                                                                                                                                                                                |
-| -------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `min_span_weeks`                 | `1e-6`                | Нижняя граница **длины окна** в неделях при расчёте частоты публикаций (чтобы не делить на ноль и не получать бесконечность при почти совпадающих датах). Обозначение в тексте: \epsilon или `min_span_weeks`. |
-| `posting_frequency_ref_per_week` | `14.0`                | Опорная частота **постов в неделю**. Если фактическая частота равна этому значению, нормализованная частота в **activity_score** равна 1.0 (дальше режется сверху).                                            |
-| `activity_w_frequency`           | `0.55`                | Вес компоненты «частота» в **activity_score** (сумма трёх весов должна быть 1.0).                                                                                                                              |
-| `activity_w_recency`             | `0.35`                | Вес компоненты «свежесть последнего поста».                                                                                                                                                                    |
-| `activity_w_volume`              | `0.10`                | Вес компоненты «объём выборки» (логарифм числа постов).                                                                                                                                                        |
-| `volume_ref_posts`               | `100.0`               | Опорное число постов N_{\text{ref}}: при N = N_{\text{ref}} логарифмическая компонента объёма равна 1.0.                                                                                                       |
-| `consistency_cv_scale`           | `2.0`                 | Масштаб в экспоненте для **consistency_score**: чем больше, тем мягче штраф за неравномерные интервалы между постами.                                                                                          |
-| `engagement_forward_rate_cap`    | `1.0`                 | Верхняя граница **доли** «пересылки к просмотрам» на один пост (если f/v > 1, для среднего берётся `cap`).                                                                                                     |
-
+| Поле                           | По умолчанию | Роль |
+| ------------------------------ | ------------ | ------ |
+| `min_span_weeks`               | `1e-6`       | Минимальная длина окна (**недели**) между первым и последним постом при расчёте `posting_frequency` — защита от деления на ноль. Обозначение: ε. |
+| `posting_frequency_ref_per_week` | `14.0`   | Опорная частота **постов/нед**; при равной фактической частоте нормализованная частота в activity = 1.0 (перед ограничением сверху). |
+| `activity_w_frequency`         | `0.55`       | Вес компоненты «частота». |
+| `activity_w_recency`           | `0.35`       | Вес компоненты «свежесть». |
+| `activity_w_volume`            | `0.10`       | Вес компоненты «объём выборки». |
+| **Инвариант**                  | —            | Сумма `activity_w_frequency + activity_w_recency + activity_w_volume` **должна быть 1.0** (иначе при создании объекта будет `ValueError`). |
+| `volume_ref_posts`             | `100.0`      | \(N_{\text{ref}}\): при \(N\) постах объём \(\ln(1+N)/\ln(1+N_{\text{ref}})\); при \(N=N_{\text{ref}}\) объёмное слагаемое = 1.0. |
+| `consistency_cv_scale`         | `2.0`        | Параметр **s** в `consistency_score = 100 · exp(-CV/s)` — больше значение ⇒ мягче штраф за неравномерные интервалы. |
+| `engagement_forward_rate_cap` | `1.0`        | Верхняя граница **отношения** `forwards/views` на один пост перед усреднением. |
 
 ---
 
 ## 2. Средние просмотры: `avg_views`
 
-**Идея:** оценить типичный охват поста по тем сообщениям, где Telegram отдал число просмотров.
+**Идея:** типичный охват только по постам с известными положительными просмотрами.
 
-**Множество постов, участвующих в среднем:**  
-S =  i \mid views_i \neq \texttt{None} \land views_i > 0 .
+**Множество:** \(S = \{ i \mid views_i \neq \texttt{None} \land views_i > 0 \}\).
 
-**Формула:** если |S| = 0, результат `**None`**. Иначе
+**Результат:** если \(S\) пусто → **`None`**. Иначе
 
+\[
+\texttt{avg\_views} = \frac{1}{|S|} \sum_{i \in S} views_i
+\]
 
-\texttt{avgviews} = \frac{1}{|S|} \sum_{i \in S} views_i
-
-
-**Пояснение переменных:**
-
-- views_i — просмотры i-го поста (поле `views` в `PostMetricRow`).
-- |S| — число постов с валидной положительной статистикой просмотров.
+Функция: `compute_avg_views`.
 
 ---
 
 ## 3. Частота публикаций: `posting_frequency` (постов в неделю)
 
-**Идея:** по **самому раннему** и **самому позднему** `posted_at` в выборке оценить, сколько постов в неделю соответствует наблюдаемой плотности (по числу **интервалов** между постами).
+**Идея:** по времени между **первым** и **последним** постом (после сортировки по `posted_at`) оценить эквивалентную плотность «постов в неделю».
 
-Посты сортируются по `posted_at` по возрастанию. Обозначения:
+Обозначения:
 
-- N — число постов в выборке (`len(posts)`).
-- t_0 — время первого поста (UTC), t_{N-1} — время последнего.
-- \Delta t_{\text{час}} — модуль разницы t_{N-1} - t_0 в **часах**.
-- \text{spanweeks} = \max\left(\dfrac{\Delta t_{\text{час}}}{168},\ \epsilon\right), где 168 = 7 \times 24 (часов в неделе), \epsilon = `min_span_weeks`.
+- \(N\) — число постов (`len(posts)`).
+- Посты сортируются по возрастанию времени (`_sorted_posts`).
+- \(\Delta t\) — модуль разницы между временем последнего и первого поста в **часах**.
+- \(\text{span\_weeks} = \max(\Delta t / 168,\ \varepsilon)\), где 168 часов = одна неделя, \(\varepsilon\) = `min_span_weeks`.
 
-**Формула при N \ge 2:**
+При **\(N \ge 2\)**:
 
+\[
+\texttt{posting\_frequency} = \frac{7 \cdot (N - 1)}{\text{span\_weeks}}
+\]
 
-\texttt{postingfrequency} = \frac{7 \cdot (N - 1)}{\text{spanweeks}}
+При **\(N < 2\)** интервал между крайними постами как «окно из одной точки» не даёт устойчивой скорости → **`None`**.
 
-
-**Смысл:** между первым и последним постом N-1 «промежутков»; экстраполяция на одну неделю даёт оценку постов/нед.
-
-**При N < 2:** интервал между постами не определён → результат `**None`**.
+Функция: `compute_posting_frequency`.
 
 ---
 
 ## 4. Прокси вовлечённости: `engagement_proxy`
 
-**Идея:** без реакций и комментариев в модели используется **доля пересылок от просмотров** по каждому посту (типичный суррогат «насколько посты шарят»).
+**Идея:** среднее отношение пересылок к просмотрам по постам, где есть просмотры (с урогом сверху на пост).
 
-Для каждого поста i, у которого views_i > 0:
+Для каждого поста с `views > 0` и не `None`:
 
-- f_i — пересылки: `forwards` или 0, если `None`.
-- c — `engagement_forward_rate_cap` (по умолчанию 1.0).
+- \(f_i = \max(\texttt{forwards приведённое к int},\, 0)\) (при `forwards=None` используется 0 перед приведением);
+- \(\texttt{cap} =\) `engagement_forward_rate_cap`;
+- \(r_i = \min(f_i / v_i,\ \texttt{cap})\).
 
+Если таких постов нет → **`0.0`**. Иначе
 
-r_i = \min\left(\frac{f_i}{views_i},\ c\right)
+\[
+\texttt{engagement\_proxy} = \frac{1}{|R|} \sum_{i \in R} r_i
+\]
 
+\(r_i \in [0,\ \texttt{cap}]\); при cap = 1 — типичное «mean forward rate capped at 100%».
 
-Если ни у одного поста нет views_i > 0, `**engagement_proxy = 0.0`**. Иначе
-
-
-\texttt{engagementproxy} = \frac{1}{|R|} \sum_{i \in R} r_i
-
-
-где R — множество индексов с положительными просмотрами.
-
-**Пояснение:** r_i \in [0, c]; при c=1 значение интерпретируется как средняя «удельная пересылка» с капом 100% на пост.
+Функция: `compute_engagement_proxy`.
 
 ---
 
-## 5. Оценка активности: `activity_score` (шкала 0…100)
+## 5. Оценка активности: `activity_score` [0 … 100]
 
-**Идея:** сочетать три фактора: насколько часто выходят посты, насколько **недавно** был последний пост относительно заданного `now_utc`, и насколько **большая** выборка постов (логарифмически, чтобы не доминировало только число N).
+**Идея:** комбинация нормализованной частоты, свежести последнего поста и логарифмического «объёма» выборки.
 
-Обозначения:
+При **\(N = 0\)** постов → **`0.0`**.
 
-- N — число постов.
-- `freq` — результат `posting_frequency` (может быть `None`).
-- F_{\text{ref}} = `posting_frequency_ref_per_week`.
-- \text{freqnorm} = \begin{cases} 0 & \text{если freq is None}  \min(\texttt{freq}/F_{\text{ref}},\ 1) \end{cases}
-- \text{rec} = **компонента свежести** \in [0,1] — функция от часов с момента последнего поста до `now_utc` (см. ниже).
-- \text{vol} = \dfrac{\ln(1+N)}{\ln(1+N_{\text{ref}})}, где N_{\text{ref}} = `volume_ref_posts`.
-- w_f, w_r, w_v — `activity_w_frequency`, `activity_w_recency`, `activity_w_volume` (сумма = 1).
+Иначе пусть:
 
-**Формула:**
+- \(\texttt{freq} =\) результат `compute_posting_frequency` (может быть `None`);
+- \(\texttt{freq\_norm} = 0\) если `freq is None`, иначе `\min(freq / F_{\text{ref}}, 1)`, где \(F_{\text{ref}}\) = `posting_frequency_ref_per_week`;
+- \(\texttt{rec} =\) `_recency_component(последний posted_at, now_utc)` \(\in [0,1]\);
+- \(\texttt{vol} = \ln(1+N) / \ln(1+N_{\text{ref}})\), \(N_{\text{ref}}\) = `volume_ref_posts` (если \(N\le 0\), объём принудительно 0 только в общем случае не возникает, т.к. при \(N\ge 1\) уже вошли в ветку);
+- \(w_f, w_r, w_v\) — веса `activity_w_frequency`, `activity_w_recency`, `activity_w_volume`.
 
+Сырые сумма \( \texttt{raw} = w_f \cdot \texttt{freq\_norm} + w_r \cdot \texttt{rec} + w_v \cdot \texttt{vol} \).
 
-\texttt{activityscore} = \min\left(100,\ \max\left(0,\ 100 \cdot (w_f \cdot \text{freqnorm} + w_r \cdot \text{rec} + w_v \cdot \text{vol})\right)\right)
+**Итог:**
 
+\[
+\texttt{activity\_score} = \mathrm{clamp}\bigl(100 \cdot \texttt{raw},\, 0,\, 100\bigr)
+\]
 
-**Компонента свежести \text{rec}** (`_recency_component`): пусть `hours` — неотрицательное число часов от последнего `posted_at` до `now_utc`.
+(в коде — `max(0, min(100, …))`)
 
-- если `hours ≤ 72` → \text{rec} = 1.0;
-- если `72 < hours ≤ 14×24` → линейный спад от 1.0 до 0.25;
-- если дольше → \text{rec} = \max(0.05,\ \exp(-(\text{hours} - 14\times24) / (30\times24))) (мягкий «хвост»).
+### Свежесть `_recency_component`
 
-**При N = 0:** `activity_score = 0`.
+Пусть `hours` — неотрицательное число часов от времени **последнего** поста до `now_utc` (разница усекается снизу нулём: `hours = max(0, ...)`).
+
+По **`compute.py`**:
+
+- если `hours ≤ 72` → \(\texttt{rec} = 1.0\);
+- если \(72 < \texttt{hours} \le 14\cdot 24\) — линейный спуск от **1.0** до **0.25**;
+- иначе → \(\texttt{rec} = \max(0.05,\ \exp(-(\texttt{hours} - 14\cdot 24)/(30\cdot 24)))\).
+
+Функция: `compute_activity_score`; требует явный **`now_utc`** на входе функции отдельно (при сборке снимка см. §7).
 
 ---
 
-## 6. Регулярность графика: `consistency_score` (шкала 0…100)
+## 6. Регулярность графика: `consistency_score` [0 … 100]
 
-**Идея:** чем **ровнее** промежутки времени между соседними постами (в хронологическом порядке), тем выше балл; хаотичные «провалы и залпы» снижают его.
+**Идея:** чем ближе друг к другу **часы между соседними постами**, тем выше балл (`CV = pstdev(gaps)/mean(gaps)` в часах).
 
-Посты сортируются по `posted_at`. Строится список интервалов в **часах**:
+- **\(N < 2\)**: интервалов нет → **`50.0`** (нейтрально).
+- **Ровно один интервал** (\(N=2\)): **`100.0`** (не с чем сравнивать вариативность).
+- Иначе: gaps в часах между соседними постами, \(\mu = \mathrm{mean}(\texttt{gaps})\), если \(\mu \le 0\) → **`50.0`**. Стандартное отклонение — `statistics.pstdev`. \(CV=\sigma/\mu\).
 
+\[
+\texttt{consistency\_score} = 100 \cdot \exp(-CV/s), \quad s = \texttt{consistency\_cv\_scale}
+\]
 
-gap_j = |t_{j+1} - t_j| \quad\text{в часах},\quad j = 0,\ldots,N-2
-
-
-- Если N < 2: интервалов нет → возвращается **нейтральное 50** (нет данных о регулярности).
-- Если ровно **один** интервал (N=2): **100** (одиночный интервал не сравнивается с другими).
-- Если интервалов \ge 2:  
-\mu = \text{mean}(gap), \sigma = \text{pstdev}(gap) (стандартное отклонение по выборке как у `statistics.pstdev`).
-
-**Коэффициент вариации:**
-
-
-CV = \begin{cases} \sigma / \mu & \mu > 0  \text{особый случай} \end{cases}
-
-
-При \mu \le 0 возвращается нейтральное 50.
-
-**Формула score:**
-
-
-\texttt{consistencyscore} = 100 \cdot \exp\left(-\frac{CV}{s}\right)
-
-
-где s = `consistency_cv_scale` (по умолчанию 2.0). При CV=0 (все интервалы равны) получается 100.
+Функция: `compute_consistency_score`.
 
 ---
 
 ## 7. Сводный объект: `compute_channel_metrics`
 
-Функция собирает:
+Функция `compute_channel_metrics(posts, *, context=None, weights=None, now_utc=None)` возвращает **`ChannelMetricsSnapshot`**:
 
-- `avg_views`, `posting_frequency`, `engagement_proxy`, `activity_score`, `consistency_score`;
-- `posts_used = N`;
-- `meta`: ISO-время `now_utc_used`, `subscriber_count` из контекста.
+| Поле                 | Значение |
+| -------------------- | -------- |
+| `avg_views`          | `compute_avg_views` |
+| `posting_frequency`  | `compute_posting_frequency` |
+| `engagement_proxy`   | `compute_engagement_proxy` |
+| `activity_score`     | `compute_activity_score` с временем ниже |
+| `consistency_score`  | `compute_consistency_score` |
+| `posts_used`         | `len(posts)` |
+| `meta["now_utc_used"]` | ISO `resolved_now` |
+| `meta["subscriber_count"]` | из `context` |
 
-Порядок вызова внутренних функций и использование `MetricWeights` совпадает с кодом `compute_channel_metrics` в `compute.py`.
+**Выбор референсного времени для activity:**
+
+```
+resolved_now = now_utc  (явный аргумент)
+               or context.now_utc
+               or datetime.now(timezone.utc)
+```
+
+Если нужна воспроизводимость (тесты, отладка), задавайте `now_utc` явно.
 
 ---
 
-## 8. Расширение
+## 8. Связанные утилиты
 
-- Передайте свой `MetricWeights`, чтобы сдвинуть пороги без копирования формул.
-- Новые метрики логично добавлять отдельными чистыми функциями и при необходимости расширить `ChannelMetricsSnapshot` (миграции БД — отдельно, если метрики сохраняются в `snapshots.metrics_json` и т.п.).
+- Отдельные функции экспортируются из `compute`: `compute_avg_views`, `compute_posting_frequency`, `compute_engagement_proxy`, `compute_activity_score`, `compute_consistency_score` — см. их использование в `app/ai/stages/context_builder.py` для краткого снимка по постам.
 
 ---
 
-## 9. Связь с тестами
+## 9. Расширение
 
-Поведение движка покрыто юнит-тестами [`tests/test_channel_metrics_compute.py`](../tests/test_channel_metrics_compute.py).
+- Передавайте свой `MetricWeights`, чтобы менять пороги без правки формул.
+- При изменении набора метрик расширяйте `ChannelMetricsSnapshot` и при необходимости миграции для полей БД (`snapshots.metrics_json` и т.п.) — отдельно от этого модуля.
 
-Инструкции по запуску `pytest` и таблица «что проверяют» файлы в `tests/` — см. **[Тесты (backend) в корневом README](../../README.md#backend-tests)**.
+---
+
+## 10. Связь с тестами
+
+Юнит-тесты: [`backend/tests/test_channel_metrics_compute.py`](../tests/test_channel_metrics_compute.py).
+
+Запуск и общее описание тестового контура см. в **[Тесты (backend) в корневом README](../../README.md#backend-tests)**.

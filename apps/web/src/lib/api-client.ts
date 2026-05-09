@@ -9,11 +9,18 @@ import type {
   AnalyzeChannelByHandleRequest,
   SummarizeChannelByHandleRequest,
   ChannelDetail,
+  ChannelDatasetListResponse,
+  ChannelCollectRequest,
+  ChannelCollectResponse,
+  ChannelCreateResult,
   CompareChannelsRequest,
   CompareChannelsResponse,
   HealthResponse,
   SearchChannelsRequest,
   SearchChannelsResponse,
+  SearchTopicOptionsResponse,
+  DataShowcaseResponse,
+  ManualReviewJournalResponse,
   SemanticSearchRequest,
   SemanticSearchResponse,
   SimilarChannelsResponse,
@@ -30,6 +37,10 @@ export function getApiBaseUrl(): string {
     return process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
   }
   return process.env.API_URL ?? process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+}
+
+function getPublicApiBaseUrl(): string {
+  return process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 }
 
 export class ApiError extends Error {
@@ -108,6 +119,10 @@ export async function searchChannels(body: SearchChannelsRequest): Promise<Searc
   });
 }
 
+export async function getSearchTopicOptions(): Promise<SearchTopicOptionsResponse> {
+  return jsonFetch<SearchTopicOptionsResponse>("/api/v1/search-channels/topics");
+}
+
 export async function fetchOrchestrationJobStatus(jobId: string): Promise<OrchestrationJobStatus> {
   return jsonFetch<OrchestrationJobStatus>(`/api/v1/orchestration/jobs/${encodeURIComponent(jobId)}`);
 }
@@ -121,6 +136,32 @@ export async function cancelOrchestrationJob(jobId: string): Promise<Orchestrati
 
 export async function getChannel(channelId: number): Promise<ChannelDetail> {
   return jsonFetch<ChannelDetail>(`/api/v1/channel/${channelId}`);
+}
+
+export async function listDatasets(limit = 50, offset = 0): Promise<ChannelDatasetListResponse> {
+  const q = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  return jsonFetch<ChannelDatasetListResponse>(`/api/v1/channels?${q}`);
+}
+
+export async function createDatasetChannel(body: {
+  channel_ref: string;
+  topic_search?: string | null;
+  extra_conditions?: string | null;
+}): Promise<ChannelCreateResult> {
+  return jsonFetch<ChannelCreateResult>("/api/v1/channels", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function collectDatasetChannel(
+  channelId: number,
+  body: ChannelCollectRequest,
+): Promise<ChannelCollectResponse> {
+  return jsonFetch<ChannelCollectResponse>(`/api/v1/channels/${encodeURIComponent(String(channelId))}/collect`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
 
 export async function analyzeChannel(
@@ -198,11 +239,38 @@ export async function compareChannels(body: CompareChannelsRequest): Promise<Com
   });
 }
 
+export async function getDataShowcase(limit = 100): Promise<DataShowcaseResponse> {
+  const q = new URLSearchParams({ limit: String(limit) });
+  return jsonFetch<DataShowcaseResponse>(`/api/v1/data-showcase?${q}`);
+}
+
+export function exportDataShowcaseUrl(format: "json" | "csv", limit = 100): string {
+  const q = new URLSearchParams({ format, limit: String(limit) });
+  return `${getPublicApiBaseUrl()}/api/v1/data-showcase/export?${q}`;
+}
+
+export async function getManualReviewJournal(
+  source: "all" | "audit" | "search" | "analyze" | "semantic" = "all",
+  limit = 100,
+): Promise<ManualReviewJournalResponse> {
+  const q = new URLSearchParams({ source, limit: String(limit) });
+  return jsonFetch<ManualReviewJournalResponse>(`/api/v1/manual-review?${q}`);
+}
+
+export function exportManualReviewUrl(
+  format: "json" | "csv",
+  source: "all" | "audit" | "search" | "analyze" | "semantic" = "all",
+  limit = 100,
+): string {
+  const q = new URLSearchParams({ format, source, limit: String(limit) });
+  return `${getPublicApiBaseUrl()}/api/v1/manual-review/export?${q}`;
+}
+
 export async function deleteChannel(channelId: number): Promise<void> {
   await jsonFetch<void>(`/api/v1/channels/${channelId}`, { method: "DELETE" });
 }
 
 export function exportChannelsUrl(format: "json" | "csv"): string {
   const q = new URLSearchParams({ format, limit: "500" });
-  return `${getApiBaseUrl()}/api/v1/export?${q}`;
+  return `${getPublicApiBaseUrl()}/api/v1/export?${q}`;
 }

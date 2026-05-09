@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 
 from app.ai.clients.openai_chat import OpenAIStageClient
@@ -39,6 +40,9 @@ from app.ai.stages.recommendations import run_recommendations
 from app.ai.stages.structured_output import run_structured_audit
 from app.ai.stages.summarization import run_summarization
 from app.ai.stages.validation import run_validation
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -83,18 +87,31 @@ class ChannelAnalysisPipeline:
     """
 
     async def run(self, inp: ChannelPipelineInput) -> PipelineRunResult:
+        logger.info(
+            "channel_analysis_pipeline.begin analyzer=%s prompt_v=%s posts=%s rag_attached=%s",
+            inp.analyzer_id,
+            inp.prompt_version,
+            len(inp.posts),
+            inp.rag_fetcher is not None,
+        )
         bundle = build_context_bundle(inp)
         client = OpenAIStageClient()
         renderer = prompt_renderer()
 
         plan = await run_planner(bundle=bundle, client=client, renderer=renderer)
+        logger.info("channel_analysis_pipeline.stage planner use_rag=%s", bool(plan.use_rag))
 
         # Tool-вызов по плану: опциональный semantic retrieval (Qdrant и т.д.)
         if inp.rag_fetcher is not None and plan.use_rag:
             snippets = await inp.rag_fetcher(plan, bundle)
             bundle.rag_snippets.extend(snippets)
+            logger.info(
+                "channel_analysis_pipeline.stage rag snippets_added=%s",
+                len(snippets),
+            )
 
         validation = run_validation(plan=plan, bundle=bundle)
+        logger.info("channel_analysis_pipeline.stage validation_status=%s", validation.status.value)
         if validation.status == ValidationStatus.BLOCK:
             raise PipelineValidationBlockedError(
                 "Validation layer заблокировал запуск дорогих стадий.",
@@ -103,6 +120,10 @@ class ChannelAnalysisPipeline:
 
         summary_text = await run_summarization(
             bundle=bundle, plan=plan, client=client, renderer=renderer
+        )
+        logger.info(
+            "channel_analysis_pipeline.stage summarization_chars=%s",
+            len(summary_text or ""),
         )
         audit, first_try_ok = await run_structured_audit(
             bundle=bundle,
@@ -130,6 +151,13 @@ class ChannelAnalysisPipeline:
             "structured_json_first_try_ok": signals.structured_json_first_try_ok,
             "plan_confidence": signals.plan_confidence,
         }
+
+        logger.info(
+            "channel_analysis_pipeline.done confidence=%s validation=%s structured_first_try_ok=%s",
+            round(conf, 4),
+            validation.status.value,
+            first_try_ok,
+        )
 
         return PipelineRunResult(
             analyzer_id=inp.analyzer_id,

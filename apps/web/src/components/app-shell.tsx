@@ -4,6 +4,9 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   BarChart3,
+  ClipboardList,
+  Database,
+  FileJson,
   Home,
   Layers,
   LineChart,
@@ -14,9 +17,12 @@ import {
 const nav = [
   { href: "/", label: "Главная", icon: Home },
   { href: "/search", label: "Поиск каналов", icon: Search },
+  { href: "/datasets", label: "Наборы данных", icon: Database },
   { href: "/channel-analysis", label: "Анализ канала", icon: LineChart },
   { href: "/semantic-search", label: "Семантический поиск", icon: Layers },
   { href: "/compare", label: "Сравнение", icon: BarChart3 },
+  { href: "/showcase", label: "Витрина данных", icon: FileJson },
+  { href: "/manual-review", label: "Требует проверки", icon: ClipboardList },
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {

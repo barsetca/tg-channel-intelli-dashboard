@@ -21,6 +21,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionDeveloperMessageParam, ChatCompletionUserMessageParam
+from pydantic import BaseModel, Field
 from qdrant_client.models import FieldCondition, Filter, MatchValue, PayloadSchemaType
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,6 +50,8 @@ from app.models.post import Post
 from app.orchestration.coordinator import OrchestrationCoordinator
 from app.repositories.channel_repository import ChannelRepository
 from app.schemas.intelligence import (
+    AIPlanAndCollectRequest,
+    AIPlanAndCollectResponse,
     AnalyzeChannelResponse,
     ChannelAnalysisHistoryItem,
     ChannelAnalysisReport,
@@ -66,6 +69,11 @@ from app.schemas.intelligence import (
     ManualReviewFlags,
     SearchChannelsRequest,
     SearchChannelsResponse,
+    SearchTopicOptionsResponse,
+    DataShowcaseItem,
+    DataShowcaseResponse,
+    ManualReviewJournalItem,
+    ManualReviewJournalResponse,
     SimilarChannelSignals,
     SimilarChannelItem,
     SimilarChannelsResponse,
@@ -84,10 +92,185 @@ from app.services.channel_search_planner import merge_planner_with_user_request,
 from app.services.vector_service import VectorService
 
 logger = logging.getLogger(__name__)
+
+
+def _log_preview(text: str | None, *, max_len: int = 120) -> str:
+    """Строка для логов: без переводов строк, с усечением."""
+    s = (text or "").replace("\n", " ").strip()
+    if len(s) <= max_len:
+        return s
+    return f"{s[: max_len - 1]}…"
+
+
 _URL_RE = re.compile(r"https?://\S+")
 _HASHTAG_RE = re.compile(r"#([\w_]{2,64})", flags=re.UNICODE)
 _MENTION_RE = re.compile(r"@([\w_]{3,64})", flags=re.UNICODE)
 _DATE_LINE_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2}\]")
+_WORD_RE = re.compile(r"[a-zA-Zа-яА-ЯёЁ0-9_]+", flags=re.UNICODE)
+
+_SEMANTIC_STOPWORDS: frozenset[str] = frozenset(
+    {
+        # ru
+        "и",
+        "в",
+        "во",
+        "на",
+        "по",
+        "про",
+        "о",
+        "об",
+        "под",
+        "над",
+        "с",
+        "со",
+        "для",
+        "к",
+        "ко",
+        "от",
+        "до",
+        "из",
+        "у",
+        "а",
+        "но",
+        "или",
+        "что",
+        "какие",
+        "какой",
+        "какая",
+        "какое",
+        "есть",
+        "ли",
+        "нибудь",
+        "это",
+        "эта",
+        "этот",
+        "эти",
+        "всё",
+        "все",
+        "чем",
+        "как",
+        "почему",
+        "зачем",
+        # en
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "of",
+        "to",
+        "in",
+        "on",
+        "for",
+        "with",
+        "about",
+        "what",
+        "which",
+        "is",
+        "are",
+    }
+)
+
+
+class SemanticGateOutput(BaseModel):
+    should_search: bool = Field(
+        ...,
+        description="Разрешать ли дорогой векторный поиск по текущему запросу.",
+    )
+    relevance: str = Field(
+        ...,
+        description="Оценка релевантности запроса темам каталога: high/medium/low.",
+    )
+    matched_topics: list[str] = Field(
+        default_factory=list,
+        description="Темы из каталога, с которыми есть смысловое совпадение.",
+    )
+    is_too_generic: bool = Field(
+        False,
+        description="Слишком общий или мусорный запрос без предметной темы.",
+    )
+    reason: str = Field("", description="Короткая причина решения gate.")
+    hints: list[str] = Field(default_factory=list, description="Подсказки по уточнению запроса.")
+
+
+def _whitelist_gate_topics_against_catalog(
+    gate_topics: Sequence[str],
+    catalog: Sequence[str],
+) -> list[str]:
+    """Оставляем только темы, реально присутствующие в каталоге (точно или по подстроке ≥4 символов)."""
+    cat_norm: dict[str, str] = {}
+    for c in catalog:
+        s = (c or "").strip()
+        if not s:
+            continue
+        cat_norm[s.casefold()] = s
+    out: list[str] = []
+    seen_cf: set[str] = set()
+    min_sub = 4
+    for raw in gate_topics or []:
+        g = (raw or "").strip()
+        if not g:
+            continue
+        gfc = g.casefold()
+        canon = cat_norm.get(gfc)
+        if canon is not None:
+            ck = canon.casefold()
+            if ck not in seen_cf:
+                seen_cf.add(ck)
+                out.append(canon)
+            continue
+        for ck, canon in cat_norm.items():
+            if len(gfc) >= min_sub and len(ck) >= min_sub and (gfc in ck or ck in gfc):
+                if ck not in seen_cf:
+                    seen_cf.add(ck)
+                    out.append(canon)
+                break
+    return out
+
+
+def _channel_matches_gate_topics(ch: Channel | None, allowed: Sequence[str]) -> bool:
+    if not allowed:
+        return True
+    if ch is None:
+        return False
+    ts = (ch.topic_search or "").strip().casefold()
+    pt = (ch.primary_topic or "").strip().casefold()
+    if not ts and not pt:
+        return False
+    min_sub = 3
+    for a in allowed:
+        ac = (a or "").strip().casefold()
+        if not ac:
+            continue
+        if ts == ac or pt == ac:
+            return True
+        if len(ac) >= min_sub and (ac in ts or ac in pt):
+            return True
+        if len(ts) >= min_sub and ts in ac:
+            return True
+        if len(pt) >= min_sub and pt in ac:
+            return True
+    return False
+
+
+def _dedupe_semantic_post_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str | int]] = set()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        un = str(r.get("channel_username") or "").lstrip("@").casefold()
+        mid = r.get("message_id")
+        if mid is not None:
+            try:
+                key: tuple[str, str | int] = (un, int(mid))
+            except (TypeError, ValueError):
+                key = (un, str(mid))
+        else:
+            key = (un, str(r.get("point_id") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out
 
 
 @dataclass
@@ -122,6 +305,28 @@ def channel_display_ref(ch: Channel) -> str:
     if slug:
         return slug
     return f"#{ch.id}"
+
+
+def _semantic_query_terms(text: str) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for token in _WORD_RE.findall((text or "").lower()):
+        t = token.strip("_")
+        if len(t) < 3 or t.isdigit() or t in _SEMANTIC_STOPWORDS:
+            continue
+        if t in seen:
+            continue
+        seen.add(t)
+        terms.append(t)
+    return terms
+
+
+def _semantic_overlap_ratio(query_terms: list[str], text: str) -> float:
+    if not query_terms:
+        return 0.0
+    lowered = (text or "").lower()
+    matched = sum(1 for t in query_terms if t in lowered)
+    return float(matched) / float(len(query_terms))
 
 
 def analysis_status_message(
@@ -198,10 +403,40 @@ class IntelligenceService:
             "интересное",
             "подборка",
         }
+        impossible_markers = (
+            "закрыт",
+            "приват",
+            "всех конкурент",
+            "закрытую статистик",
+            "приватную статистик",
+        )
+        ambiguous_markers = (
+            "самое важное",
+            "лучшие",
+            "сделай вывод",
+            "по рынку",
+        )
+        if any(m in t for m in impossible_markers):
+            return ManualReviewFlags(
+                needs_review=True,
+                reason="Запрос требует закрытых или недоступных данных источника.",
+                hints=[
+                    "Уточните запрос только на публичные данные Telegram-каналов.",
+                    "Уберите требования к приватной/закрытой статистике.",
+                ],
+            )
+        if any(m in t for m in ambiguous_markers):
+            return ManualReviewFlags(
+                needs_review=True,
+                reason="Запрос двусмысленный: недостаточно критериев для автоматического сбора.",
+                hints=[
+                    "Добавьте тему/нишу и конкретные ограничения (период, язык, подписчики).",
+                    "Уточните, что именно считать релевантным результатом.",
+                ],
+            )
         has_extra_filters = (
             body.min_subscribers is not None
             or body.max_subscribers is not None
-            or bool(body.language)
             or bool(body.region_country)
             or bool((body.extra_conditions or "").strip())
         )
@@ -307,10 +542,14 @@ class IntelligenceService:
         """Сценарий 1 шаг 5: audit_runs + audit_run_items для поиска по локальному каталогу."""
         audit = AuditRun(
             audit_kind="channel_discovery",
+            action="search_saved_catalog",
             status="completed",
+            duration_ms=0,
             raw_user_input_json=body.model_dump(mode="json"),
+            input_json=body.model_dump(mode="json"),
             planner_output_json=planner.model_dump(mode="json"),
             result_summary_json={"source": "saved_catalog", "channels_returned": len(rows)},
+            output_json={"source": "saved_catalog", "channels_returned": len(rows)},
         )
         self._session.add(audit)
         await self._session.flush()
@@ -329,8 +568,95 @@ class IntelligenceService:
             )
         await self._session.commit()
 
+    async def plan_and_collect_adapter(self, body: AIPlanAndCollectRequest) -> AIPlanAndCollectResponse:
+        """
+        Тонкий адаптер под требование `POST /ai/plan_and_collect`.
+        Использует текущий planner + manual review логику, не запуская фактический сбор.
+        """
+        logger.info("plan_and_collect_adapter begin query=%r", _log_preview(body.query, max_len=200))
+        req = SearchChannelsRequest(
+            topic=body.query.strip(),
+            count=10,
+            search_source="saved_catalog",
+            channel_type="all",
+        )
+        review = self._manual_review_too_broad(req)
+        planner = await plan_channel_search(self._settings, req.model_dump(mode="json"))
+        merged = merge_planner_with_user_request(req.model_dump(mode="json"), planner)
+
+        needs_review = bool(review is not None or planner.confidence == "low")
+        steps = [
+            "Проверить запрос и определить, нужна ли ручная проверка.",
+            "Построить параметры поиска (topic/count/language/region/subscribers).",
+            "Подготовить вызов основного API поиска каналов.",
+            "Сохранить результат и аудит выполнения.",
+        ]
+        fields_to_keep = [
+            "id",
+            "telegram_id",
+            "username",
+            "title",
+            "description",
+            "subscriber_count",
+            "primary_topic",
+            "last_post_at",
+            "language_hint",
+            "region_country",
+        ]
+
+        audit = AuditRun(
+            audit_kind="channel_discovery",
+            action="ai_plan_and_collect",
+            status="completed",
+            duration_ms=0,
+            raw_user_input_json=body.model_dump(mode="json"),
+            input_json=body.model_dump(mode="json"),
+            planner_output_json=planner.model_dump(mode="json"),
+            quality_gate_json={
+                "needs_review": needs_review,
+                "reason": review.reason if review else ("low_confidence" if planner.confidence == "low" else ""),
+            },
+            output_json={
+                "plan_steps": steps,
+                "api_url": "/api/v1/search-channels",
+                "fields_to_keep": fields_to_keep,
+                "confidence": planner.confidence,
+                "needs_review": needs_review,
+                "normalized_params": merged,
+            },
+        )
+        self._session.add(audit)
+        await self._session.flush()
+        aid = int(audit.id)
+        await self._session.commit()
+
+        logger.info(
+            "plan_and_collect_adapter done confidence=%s needs_review=%s search_topic=%r audit_id=%s",
+            planner.confidence,
+            needs_review,
+            _log_preview(planner.search_topic),
+            aid,
+        )
+
+        return AIPlanAndCollectResponse(
+            plan_steps=steps,
+            api_url="/api/v1/search-channels",
+            fields_to_keep=fields_to_keep,
+            confidence=planner.confidence,
+            needs_review=needs_review,
+        )
+
     async def search_channels(self, body: SearchChannelsRequest) -> SearchChannelsResponse:
         """Сценарий 1: каталог в SQLite + сценарий 8 при необходимости."""
+        logger.info(
+            "search_channels begin search_source=%s topic=%r count=%s live_mode=%s telethon_live=%s coordinator=%s",
+            body.search_source,
+            _log_preview(body.topic, max_len=160),
+            body.count,
+            body.live_channel_mode,
+            self._telethon_live_available,
+            self._coordinator is not None,
+        )
         all_topics_mode = body.search_source == "saved_catalog" and body.topic.strip().lower() in {
             "*",
             "__all__",
@@ -340,6 +666,11 @@ class IntelligenceService:
         }
         review = self._manual_review_too_broad(body)
         if review is not None and not all_topics_mode:
+            logger.info(
+                "search_channels manual_review_gate code=too_broad reason=%r",
+                _log_preview(review.reason, max_len=240),
+            )
+            await self._record_manual_review_search(body, review, reason_code="too_broad")
             return SearchChannelsResponse(
                 channels=[],
                 manual_review=review,
@@ -349,6 +680,11 @@ class IntelligenceService:
             )
         extra_review = await self._review_extra_conditions(body)
         if extra_review is not None and not all_topics_mode:
+            logger.info(
+                "search_channels manual_review_gate code=extra_conditions_conflict reason=%r",
+                _log_preview(extra_review.reason, max_len=240),
+            )
+            await self._record_manual_review_search(body, extra_review, reason_code="extra_conditions_conflict")
             return SearchChannelsResponse(
                 channels=[],
                 manual_review=extra_review,
@@ -365,6 +701,10 @@ class IntelligenceService:
 
         if body.search_source == "telegram_live":
             if self._coordinator is None:
+                logger.warning(
+                    "search_channels telegram_live aborted: OrchestrationCoordinator not mounted topic=%r",
+                    _log_preview(body.topic),
+                )
                 return SearchChannelsResponse(
                     channels=[],
                     manual_review=None,
@@ -377,6 +717,10 @@ class IntelligenceService:
                     has_more=False,
                 )
             if not self._telethon_live_available:
+                logger.warning(
+                    "search_channels telegram_live aborted: Telethon session not ready (%s)",
+                    _log_preview(self._telegram_live_unavailable_detail(), max_len=280),
+                )
                 return SearchChannelsResponse(
                     channels=[],
                     manual_review=None,
@@ -396,58 +740,80 @@ class IntelligenceService:
             if username_only:
                 username_ref = self._normalize_channel_ref(username_only)
                 topic_tokens = {t for t in re.findall(r"[\wа-яА-ЯёЁ]{3,}", body.topic.lower()) if len(t) >= 3}
+                saved_collect = body.live_channel_mode == "saved" and bool(body.selected_channel_ids)
                 try:
                     assert self._telegram is not None
                     info = await self._telegram.get_channel_info(username_ref)
                 except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "search_channels username_priority failed ref=%r: %s",
+                        username_ref,
+                        exc,
+                    )
+                    unavailable = ManualReviewFlags(
+                        needs_review=True,
+                        reason=f"Канал @{username_ref.lstrip('@')} недоступен или не найден: {exc}",
+                        hints=["Проверьте username и повторите поиск."],
+                    )
+                    await self._record_manual_review_search(
+                        body, unavailable, reason_code="username_channel_unavailable"
+                    )
                     return SearchChannelsResponse(
                         channels=[],
-                        manual_review=ManualReviewFlags(
-                            needs_review=True,
-                            reason=f"Канал @{username_ref.lstrip('@')} недоступен или не найден: {exc}",
-                            hints=["Проверьте username и повторите поиск."],
-                        ),
+                        manual_review=unavailable,
                         normalized_filters={**body.model_dump(mode="json"), "username_priority": True},
                         background_job=None,
                         has_more=False,
                     )
-                profile_blob = f"{(info.title or '').lower()} {(info.about or '').lower()}"
-                profile_tokens = {t for t in re.findall(r"[\wа-яА-ЯёЁ]{3,}", profile_blob) if len(t) >= 3}
-                if topic_tokens and profile_tokens and not (topic_tokens & profile_tokens):
-                    return SearchChannelsResponse(
-                        channels=[],
-                        manual_review=ManualReviewFlags(
+                if not saved_collect:
+                    profile_blob = f"{(info.title or '').lower()} {(info.about or '').lower()}"
+                    profile_tokens = {t for t in re.findall(r"[\wа-яА-ЯёЁ]{3,}", profile_blob) if len(t) >= 3}
+                    if topic_tokens and profile_tokens and not (topic_tokens & profile_tokens):
+                        logger.info(
+                            "search_channels username_channel_topic_mismatch query=%r ref=%r",
+                            _log_preview(body.topic),
+                            username_ref,
+                        )
+                        mismatch = ManualReviewFlags(
                             needs_review=True,
                             reason=(
                                 "Тематика найденного канала не соответствует запрошенной нише. "
                                 "Уточните тему или проверьте username."
                             ),
                             hints=["Измените тему/нишу или выберите другой username."],
-                        ),
-                        normalized_filters={**body.model_dump(mode="json"), "username_priority": True},
-                        background_job=None,
-                        has_more=False,
-                    )
+                        )
+                        await self._record_manual_review_search(
+                            body, mismatch, reason_code="username_channel_topic_mismatch"
+                        )
+                        return SearchChannelsResponse(
+                            channels=[],
+                            manual_review=mismatch,
+                            normalized_filters={**body.model_dump(mode="json"), "username_priority": True},
+                            background_job=None,
+                            has_more=False,
+                        )
                 live_payload["username_query"] = username_ref
-                live_payload["selected_channel_ids"] = []
-                live_payload["live_channel_mode"] = "new"
-                live_payload["channel_type"] = "all"
-                live_payload["count"] = 1
-                live_payload["language"] = body.language or "ru"
-                live_payload["region_country"] = None
-                live_payload["extra_conditions"] = None
+                # Сбор сохранённого набора: не затираем selected_channel_ids и режим saved (иначе пайплайн уходит в "new").
+                if not saved_collect:
+                    live_payload["selected_channel_ids"] = []
+                    live_payload["live_channel_mode"] = "new"
+                    live_payload["channel_type"] = "all"
+                    live_payload["count"] = 1
+                    live_payload["language"] = body.language or "ru"
+                    live_payload["region_country"] = None
+                    live_payload["extra_conditions"] = None
             if body.live_channel_mode == "saved" and body.selected_channel_ids:
                 live_payload["count"] = min(20, max(1, len(body.selected_channel_ids)))
             job_id = await self._coordinator.schedule_telegram_channel_discovery(
                 payload=live_payload,
             )
-            logger.info("Конвейер обнаружения Telegram (оркестратор).")
             logger.info(
-                "Статус обновляется каждые ~1.5 с через GET /api/v1/orchestration/jobs/…; "
-                "этапы: job_dequeued, stage_begin / stage_end."
+                "search_channels telegram_live enqueued job_id=%s payload_count=%s username_query=%s live_mode=%s",
+                job_id,
+                live_payload.get("count"),
+                bool(live_payload.get("username_query")),
+                body.live_channel_mode,
             )
-            logger.info("Идентификатор задания оркестратора: job_id=%s", job_id)
-            logger.info("Задание в очереди: Telethon → SQLite → metrics → AI → vector.")
             return SearchChannelsResponse(
                 channels=[],
                 manual_review=None,
@@ -490,6 +856,11 @@ class IntelligenceService:
                 "all_topics_mode": True,
                 "saved_catalog_topics_tried": ["__all__"],
             }
+            logger.info(
+                "search_channels saved_catalog all_topics channels_returned=%s has_more=%s",
+                len(cards),
+                has_more,
+            )
             return SearchChannelsResponse(
                 channels=cards,
                 manual_review=None,
@@ -574,6 +945,14 @@ class IntelligenceService:
                 "last_post_at_lte": last_post_at_lte.isoformat() if last_post_at_lte else None,
             },
         }
+        logger.info(
+            "search_channels saved_catalog done channels_returned=%s has_more=%s planner_topic=%r user_topic=%r confidence=%s",
+            len(cards),
+            has_more,
+            _log_preview(planner_topic),
+            _log_preview(user_topic),
+            planner.confidence,
+        )
         return SearchChannelsResponse(
             channels=cards,
             manual_review=None,
@@ -588,6 +967,206 @@ class IntelligenceService:
         if row is None:
             return None
         return ChannelDetail.model_validate(row)
+
+    async def list_search_topic_options(self) -> SearchTopicOptionsResponse:
+        items = await self._channels.list_topic_search_keywords(limit=500)
+        return SearchTopicOptionsResponse(items=items)
+
+    async def get_data_showcase(self, *, limit: int = 100) -> DataShowcaseResponse:
+        """Витрина данных: строки snapshot_json из audit_run_items с временем и источником."""
+        stmt = (
+            select(AuditRunItem, AuditRun)
+            .join(AuditRun, AuditRun.id == AuditRunItem.audit_run_id)
+            .order_by(desc(AuditRunItem.created_at), desc(AuditRunItem.id))
+            .limit(max(1, min(500, int(limit))))
+        )
+        res = await self._session.execute(stmt)
+        rows = res.all()
+        items: list[DataShowcaseItem] = []
+        for item_row, audit_row in rows:
+            source = None
+            if isinstance(audit_row.result_summary_json, dict):
+                source = str(audit_row.result_summary_json.get("source") or "").strip() or None
+            if source is None:
+                source = str(audit_row.audit_kind or "").strip() or None
+            items.append(
+                DataShowcaseItem(
+                    audit_run_id=int(audit_row.id),
+                    item_id=int(item_row.id),
+                    created_at=item_row.created_at,
+                    source=source,
+                    record_json=item_row.snapshot_json,
+                )
+            )
+        return DataShowcaseResponse(limit=max(1, min(500, int(limit))), items=items)
+
+    async def get_manual_review_journal(
+        self,
+        *,
+        limit: int = 100,
+        source_filter: str = "all",
+    ) -> ManualReviewJournalResponse:
+        cap = max(1, min(500, int(limit)))
+        filt = str(source_filter or "all").strip().lower()
+        if filt not in {"all", "audit", "search", "analyze", "semantic"}:
+            filt = "all"
+
+        out: list[ManualReviewJournalItem] = []
+        if filt in {"all", "audit", "search", "semantic"}:
+            stmt = (
+                select(AuditRun)
+                .where(AuditRun.quality_gate_json.is_not(None))
+                .order_by(desc(AuditRun.created_at), desc(AuditRun.id))
+                .limit(cap * 2)
+            )
+            rows = list((await self._session.execute(stmt)).scalars().all())
+            for row in rows:
+                qg = row.quality_gate_json if isinstance(row.quality_gate_json, dict) else {}
+                if not bool(qg.get("needs_review")):
+                    continue
+                action = (row.action or "").strip().lower()
+                if action.startswith("search_"):
+                    src = "search"
+                elif action.startswith("semantic_") or row.audit_kind == "semantic_search":
+                    src = "semantic"
+                else:
+                    src = "audit"
+                if filt != "all" and filt != src:
+                    continue
+                out.append(
+                    ManualReviewJournalItem(
+                        source=src,  # type: ignore[arg-type]
+                        reference_id=int(row.id),
+                        created_at=row.created_at,
+                        reason=str(qg.get("reason") or row.error_text or "Требуется ручная проверка."),
+                        status=row.status,
+                        details=qg,
+                    )
+                )
+
+        if filt in {"all", "analyze"}:
+            stmt = (
+                select(Analysis)
+                .where(Analysis.status == "blocked_validation")
+                .order_by(desc(Analysis.created_at), desc(Analysis.id))
+                .limit(cap)
+            )
+            rows = list((await self._session.execute(stmt)).scalars().all())
+            for row in rows:
+                reasons = []
+                if isinstance(row.result_json, dict):
+                    reasons = [str(x).strip() for x in (row.result_json.get("reasons") or []) if str(x).strip()]
+                out.append(
+                    ManualReviewJournalItem(
+                        source="analyze",
+                        reference_id=int(row.id),
+                        created_at=row.created_at,
+                        reason="; ".join(reasons) if reasons else (row.error_detail or "Валидация анализа заблокирована."),
+                        status=row.status,
+                        details=row.result_json if isinstance(row.result_json, dict) else None,
+                    )
+                )
+
+        out.sort(key=lambda x: ensure_utc_aware(x.created_at) if x.created_at else datetime(1970, 1, 1, tzinfo=timezone.utc), reverse=True)
+        return ManualReviewJournalResponse(limit=cap, source_filter=filt, items=out[:cap])
+
+    async def _record_manual_review_search(
+        self,
+        body: SearchChannelsRequest,
+        review: ManualReviewFlags,
+        *,
+        reason_code: str,
+    ) -> None:
+        audit = AuditRun(
+            audit_kind="channel_discovery",
+            action="search_saved_catalog",
+            status="needs_review",
+            duration_ms=0,
+            raw_user_input_json=body.model_dump(mode="json"),
+            input_json=body.model_dump(mode="json"),
+            quality_gate_json={
+                "needs_review": True,
+                "reason": review.reason,
+                "hints": list(review.hints),
+                "reason_code": reason_code,
+            },
+            output_json={"channels_returned": 0, "needs_review": True},
+            error_text=review.reason,
+            error=review.reason,
+        )
+        self._session.add(audit)
+        await self._session.commit()
+        logger.info("audit manual_review persisted reason_code=%s audit_id=%s", reason_code, audit.id)
+
+    async def _record_manual_review_semantic(
+        self,
+        *,
+        body: SemanticSearchRequest,
+        reason: str,
+        mode: str | None,
+    ) -> None:
+        audit = AuditRun(
+            audit_kind="semantic_search",
+            action="semantic_search",
+            status="needs_review",
+            duration_ms=0,
+            raw_user_input_json=body.model_dump(mode="json"),
+            input_json=body.model_dump(mode="json"),
+            quality_gate_json={"needs_review": True, "reason": reason},
+            output_json={"needs_review": True, "mode": mode},
+            error_text=reason,
+            error=reason,
+        )
+        self._session.add(audit)
+        await self._session.commit()
+
+    async def _semantic_needs_review_response(
+        self,
+        *,
+        body: SemanticSearchRequest,
+        reason: str,
+        mode: str | None,
+    ) -> SemanticSearchResponse:
+        await self._record_manual_review_semantic(body=body, reason=reason, mode=mode)
+        return SemanticSearchResponse(needs_review=True, reason=reason, query=body.query, mode=mode)
+
+    async def export_manual_review_payload(
+        self,
+        *,
+        limit: int = 100,
+        source_filter: str = "all",
+    ) -> list[dict[str, Any]]:
+        """Экспорт журнала ручной проверки в плоский JSON/CSV-вид."""
+        data = await self.get_manual_review_journal(limit=limit, source_filter=source_filter)
+        out: list[dict[str, Any]] = []
+        for item in data.items:
+            out.append(
+                {
+                    "source": item.source,
+                    "reference_id": item.reference_id,
+                    "created_at": item.created_at.isoformat() if item.created_at else None,
+                    "reason": item.reason,
+                    "status": item.status,
+                    "details": item.details,
+                }
+            )
+        return out
+
+    async def export_data_showcase_payload(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Экспорт строк витрины данных в плоский JSON/CSV-вид."""
+        data = await self.get_data_showcase(limit=limit)
+        out: list[dict[str, Any]] = []
+        for item in data.items:
+            out.append(
+                {
+                    "item_id": item.item_id,
+                    "audit_run_id": item.audit_run_id,
+                    "created_at": item.created_at.isoformat() if item.created_at else None,
+                    "source": item.source,
+                    "record_json": item.record_json,
+                }
+            )
+        return out
 
     async def list_channel_analysis_history(
         self,
@@ -704,6 +1283,14 @@ class IntelligenceService:
             .limit(sample_limit),
         )
         posts = list(res_posts.scalars())
+        logger.info(
+            "run_channel_analysis ingest channel_id=%s label=%s post_limit=%s db_post_rows=%s telethon_backfill=%s",
+            channel_id,
+            label,
+            post_limit,
+            len(posts),
+            len(posts) == 0 and self._telegram is not None,
+        )
         if len(posts) == 0 and self._telegram is not None:
             channel_ref = (ch.username or ch.invite_slug or str(ch.telegram_id or "")).strip()
             try:
@@ -773,6 +1360,12 @@ class IntelligenceService:
         )
         self._session.add(analysis)
         await self._session.flush()
+        logger.info(
+            "run_channel_analysis pipeline_begin analysis_id=%s snippets=%s analyzer_id=%s",
+            analysis.id,
+            len(snippets),
+            inp.analyzer_id,
+        )
 
         try:
             pipeline = ChannelAnalysisPipeline()
@@ -784,9 +1377,25 @@ class IntelligenceService:
             analysis.status = "blocked_validation"
             analysis.result_json = {"reasons": e.reasons, "validation": "block"}
             analysis.error_detail = "; ".join(e.reasons)
+            logger.warning(
+                "run_channel_analysis validation_blocked analysis_id=%s reasons=%s",
+                analysis.id,
+                list(e.reasons),
+            )
         except Exception as e:  # noqa: BLE001 — гранулярные коды добавятся по мере зрелости API
             analysis.status = "failed"
             analysis.error_detail = str(e)
+            logger.exception(
+                "run_channel_analysis pipeline_error analysis_id=%s channel_id=%s",
+                analysis.id,
+                channel_id,
+            )
+
+        logger.info(
+            "run_channel_analysis pipeline_end analysis_id=%s status=%s",
+            getattr(analysis, "id", None),
+            analysis.status,
+        )
 
         await self._session.commit()
         await self._session.refresh(analysis)
@@ -1236,6 +1845,11 @@ class IntelligenceService:
         if self._telegram is None:
             raise TelegramTelethonError(self._telegram_live_unavailable_detail())
         channel_ref = self._normalize_channel_ref(body.channel_ref)
+        logger.info(
+            "summarize_recent_posts_by_handle begin channel_ref=%r post_limit=%s",
+            channel_ref,
+            body.post_limit,
+        )
         info = await self._telegram.get_channel_info(channel_ref)
         raw_posts = await self._telegram.fetch_recent_posts(channel_ref, limit=max(80, body.post_limit * 5))
         total = len(raw_posts)
@@ -1408,6 +2022,12 @@ class IntelligenceService:
             logger.warning("scenario3 qdrant unavailable, skip save: %s", exc)
         finally:
             await qdrant.close()
+        logger.info(
+            "summarize_recent_posts_by_handle done channel_id=%s posts_used=%s qdrant_saved=%s",
+            ch.id,
+            len(post_payloads),
+            qdrant_saved,
+        )
         return SummarizePostsResponse(
             channel_id=ch.id,
             channel_display_ref=channel_display_ref(ch),
@@ -1440,10 +2060,79 @@ class IntelligenceService:
         )
         return result, None
 
+    async def _semantic_catalog_topics(self, *, limit: int = 80) -> list[str]:
+        raw_topics = await self._channels.list_topic_search_keywords(limit=max(50, limit))
+        stmt = (
+            select(Channel.primary_topic)
+            .where(Channel.primary_topic.is_not(None))
+            .where(Channel.primary_topic != "")
+            .distinct()
+            .limit(max(50, limit))
+        )
+        primary_topics = [str(x).strip() for x in (await self._session.execute(stmt)).scalars().all() if str(x or "").strip()]
+        out: list[str] = []
+        seen: set[str] = set()
+        for t in [*raw_topics, *primary_topics]:
+            key = t.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(t)
+            if len(out) >= limit:
+                break
+        return out
+
+    async def _semantic_llm_gate(
+        self,
+        *,
+        query: str,
+        mode_hint: str,
+        catalog_topics: list[str] | None = None,
+    ) -> SemanticGateOutput | None:
+        """LLM-gate перед retrieval: доменная релевантность к темам каталога."""
+        topics = catalog_topics if catalog_topics is not None else await self._semantic_catalog_topics(limit=80)
+        if not topics:
+            return None
+        try:
+            client = OpenAIStageClient(self._settings)
+            topics_payload = "\n".join(f"- {t}" for t in topics)
+            dev = (
+                "Ты quality-gate для семантического поиска Telegram-каналов. "
+                "Решение используется, чтобы запускать или не запускать дорогой векторный retrieval. "
+                "Сравни вопрос пользователя с темами каталога и верни только JSON по схеме. "
+                "Если запрос общий/мусорный/непривязанный к темам, должен быть явный отказ от поиска."
+            )
+            user = (
+                f"Режим поиска (подсказка): {mode_hint}\n"
+                f"Запрос пользователя: {query}\n"
+                f"Темы каталога:\n{topics_payload}\n\n"
+                "Правила:\n"
+                "1) should_search=true только если по запросу можно определить связь хотя бы с одной темой из списка.\n"
+                "2) relevance=low и should_search=false, если запрос общий/шумовой/непривязанный к темам.\n"
+                "3) is_too_generic=true, если нельзя понять к какой теме из списка относится запрос.\n"
+                "4) matched_topics — только дословные строки из списка выше (копируй текст темы), "
+                "при should_search=true перечисли все темы, по которым запрос релевантен.\n"
+                "5) reason краткий (1 предложение), hints до 3 пунктов.\n"
+                "6) Верни строго JSON без пояснений."
+            )
+            return await client.parse_structured(
+                messages=[
+                    ChatCompletionDeveloperMessageParam(role="developer", content=dev),
+                    ChatCompletionUserMessageParam(role="user", content=user),
+                ],
+                response_format=SemanticGateOutput,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("semantic llm gate fallback to heuristics: %s", exc)
+            return None
+
     def _semantic_route_mode(self, query: str) -> tuple[str | None, str | None]:
         q = query.strip().lower()
-        if len(q) < 8:
+        if len(q) < 3:
             return None, "Слишком общий запрос"
+        query_terms = _semantic_query_terms(q)
+        if len(query_terms) < 1:
+            return None, "Слишком общий или нерелевантный запрос: добавьте предметную тему"
         vague = {"найди интересное", "что сейчас важно", "найди хорошие каналы", "найди про"}
         if q in vague:
             return None, "Слишком общий запрос"
@@ -1474,7 +2163,6 @@ class IntelligenceService:
                 "в данных",
                 "по данным",
                 "по постам",
-                "про ",
             )
         )
         if has_channels and not has_posts:
@@ -1494,8 +2182,49 @@ class IntelligenceService:
     async def semantic_search_scenario4(self, body: SemanticSearchRequest) -> SemanticSearchResponse:
         logger.info("scenario4 routing: raw_query=%s", body.query)
         mode, reason = self._semantic_route_mode(body.query)
+        # Решение "искать или нет" принимает LLM gate; route используется как mode-hint.
         if reason:
-            return SemanticSearchResponse(needs_review=True, reason=reason, query=body.query, mode=None)
+            logger.info("scenario4 route hint (non-blocking): reason=%s", reason)
+        if mode is None:
+            mode = "question_answering_over_posts"
+        catalog_topics = await self._semantic_catalog_topics(limit=80)
+        gate = await self._semantic_llm_gate(
+            query=body.query,
+            mode_hint=mode or "unknown",
+            catalog_topics=catalog_topics,
+        )
+        allowed_gate_topics: list[str] = []
+        if gate is not None:
+            allowed_gate_topics = _whitelist_gate_topics_against_catalog(gate.matched_topics, catalog_topics)
+            if gate.matched_topics and not allowed_gate_topics:
+                logger.warning(
+                    "scenario4 gate matched_topics not in catalog; topic filter skipped: %s",
+                    gate.matched_topics[:12],
+                )
+            relevance = str(gate.relevance or "").strip().lower()
+            logger.info(
+                "scenario4 llm_gate: should_search=%s relevance=%s is_too_generic=%s matched_topics=%s reason=%s",
+                gate.should_search,
+                relevance,
+                gate.is_too_generic,
+                len(gate.matched_topics),
+                _log_preview(gate.reason, max_len=180),
+            )
+            logger.info(
+                "scenario4 gate topics for retrieval filter: raw=%s whitelisted=%s",
+                gate.matched_topics[:12],
+                allowed_gate_topics,
+            )
+            if gate.is_too_generic or relevance == "low" or not gate.should_search:
+                gate_reason = gate.reason.strip() or "Запрос слабо связан с темами накопленного корпуса."
+                logger.info("scenario4 gate reject(llm): reason=%s", gate_reason)
+                return await self._semantic_needs_review_response(
+                    body=body,
+                    reason=gate_reason,
+                    mode=mode,
+                )
+        else:
+            logger.info("scenario4 llm_gate: skipped/fallback-to-heuristics")
 
         openai = AsyncOpenAI(api_key=self._settings.openai_api_key)
         emb = await openai.embeddings.create(model=self._settings.openai_embedding_model, input=[body.query])
@@ -1529,24 +2258,22 @@ class IntelligenceService:
                     missing.append("telegram_post_summaries")
                 if not has_window_collection:
                     missing.append("telegram_channel_windows")
-                return SemanticSearchResponse(
-                    needs_review=True,
+                return await self._semantic_needs_review_response(
+                    body=body,
                     reason=(
                         "В векторной базе пока нет нужных коллекций: "
                         + ", ".join(missing)
                         + ". Сначала запустите «Резюмировать посты» минимум для одного канала."
                     ),
-                    query=body.query,
                     mode=mode,
                 )
             if (post_points_count or 0) <= 0 and (window_points_count or 0) <= 0:
-                return SemanticSearchResponse(
-                    needs_review=True,
+                return await self._semantic_needs_review_response(
+                    body=body,
                     reason=(
                         "Коллекции в векторной базе существуют, но пока пустые. "
                         "Запустите «Резюмировать посты» и убедитесь в сообщении об успешном сохранении в векторную базу."
                     ),
-                    query=body.query,
                     mode=mode,
                 )
             post_points = await qdrant.search_in_collection(
@@ -1559,16 +2286,20 @@ class IntelligenceService:
                 query_vector=qvec,
                 limit=max(20, body.limit * 2),
             )
+            logger.info(
+                "scenario4 retrieval raw: post_points=%s window_points=%s",
+                len(post_points),
+                len(window_points),
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception("scenario4 retrieval failed: %s", exc)
-            return SemanticSearchResponse(
-                needs_review=True,
+            return await self._semantic_needs_review_response(
+                body=body,
                 reason=(
                     "Не удалось выполнить поиск в векторной базе. "
                     "Проверьте доступность Qdrant и наличие данных из сценария 3. "
                     f"Техническая причина: {exc}"
                 ),
-                query=body.query,
                 mode=mode,
             )
         finally:
@@ -1582,14 +2313,14 @@ class IntelligenceService:
             if username_filter and uname != username_filter:
                 continue
             txt = str(payload.get("post_summary_short") or payload.get("search_text") or payload.get("clean_text") or "")
-            bonus = 0.08 if any(w in txt.lower() for w in body.query.lower().split()[:4]) else 0.0
-            score = float(p.score or 0.0) + bonus
+            score = float(p.score or 0.0)
             source_url = None
             if payload.get("channel_username") and payload.get("message_id"):
                 source_url = f"https://t.me/{str(payload['channel_username']).lstrip('@')}/{int(payload['message_id'])}"
             post_rows.append(
                 {
                     "score": score,
+                    "base_score": float(p.score or 0.0),
                     "channel_username": payload.get("channel_username"),
                     "message_id": payload.get("message_id"),
                     "summary": txt,
@@ -1599,6 +2330,65 @@ class IntelligenceService:
                 }
             )
         post_rows.sort(key=lambda x: x["score"], reverse=True)
+        logger.info("scenario4 post_rows prefilter: count=%s", len(post_rows))
+        if post_rows:
+            before = len(post_rows)
+            # Базовый порог: отсекаем только очень слабые результаты.
+            post_rows = [r for r in post_rows if float(r["score"]) > 0.2]
+            logger.info(
+                "scenario4 post_rows filter: score_threshold=0.2 before=%s after=%s",
+                before,
+                len(post_rows),
+            )
+            if post_rows:
+                logger.info(
+                    "scenario4 post_rows top_after: %s",
+                    [
+                        {
+                            "u": str(r.get("channel_username") or ""),
+                            "s": round(float(r.get("score") or 0.0), 4),
+                        }
+                        for r in post_rows[:5]
+                    ],
+                )
+        if post_rows and allowed_gate_topics:
+            before_tf = len(post_rows)
+            unames = {str(r.get("channel_username") or "").lstrip("@").casefold() for r in post_rows}
+            ch_map = await self._channels.map_by_username_casefold(list(unames))
+            post_rows = [
+                r
+                for r in post_rows
+                if _channel_matches_gate_topics(
+                    ch_map.get(str(r.get("channel_username") or "").lstrip("@").casefold()),
+                    allowed_gate_topics,
+                )
+            ]
+            logger.info(
+                "scenario4 post_rows topic_filter: before=%s after=%s allowed=%s",
+                before_tf,
+                len(post_rows),
+                allowed_gate_topics,
+            )
+        if post_rows:
+            before_dedupe = len(post_rows)
+            post_rows = _dedupe_semantic_post_rows(post_rows)
+            if before_dedupe != len(post_rows):
+                logger.info("scenario4 post_rows dedupe: before=%s after=%s", before_dedupe, len(post_rows))
+
+        if not post_rows:
+            logger.info("scenario4 no_results_after_score_topic_dedupe_filters")
+            return SemanticSearchResponse(
+                needs_review=False,
+                reason=None,
+                query=body.query,
+                mode=mode,
+                answer="По запросу ничего не найдено в текущем корпусе постов.",
+                results=[],
+                sources=[],
+                hits=[],
+                synthesis_placeholder=None,
+                gate_matched_topics=allowed_gate_topics or None,
+            )
 
         window_rows: list[dict[str, Any]] = []
         for p in window_points:
@@ -1617,6 +2407,17 @@ class IntelligenceService:
                 }
             )
         window_rows.sort(key=lambda x: x["score"], reverse=True)
+        if window_rows and allowed_gate_topics:
+            wnames = {str(r.get("channel_username") or "").lstrip("@").casefold() for r in window_rows}
+            ch_map_w = await self._channels.map_by_username_casefold(list(wnames))
+            window_rows = [
+                r
+                for r in window_rows
+                if _channel_matches_gate_topics(
+                    ch_map_w.get(str(r.get("channel_username") or "").lstrip("@").casefold()),
+                    allowed_gate_topics,
+                )
+            ]
 
         hits: list[SemanticSearchHit] = []
         for row in post_rows[: body.limit]:
@@ -1657,7 +2458,11 @@ class IntelligenceService:
                     SemanticResultItem(
                         channel_username=r.get("channel_username"),
                         title="Релевантный пост",
-                        relevance_reason="Семантически близок к запросу по теме и формулировкам.",
+                        relevance_reason=(
+                            "Низкая степень соответствия (score < 0.35)."
+                            if float(r.get("score") or 0.0) < 0.35
+                            else "Семантически близок к запросу по теме и формулировкам."
+                        ),
                         source_url=r.get("source_url"),
                         score=r.get("score"),
                     )
@@ -1690,13 +2495,21 @@ class IntelligenceService:
                     SemanticResultItem(
                         channel_username=uname,
                         title=f"Канал @{str(uname).lstrip('@')}",
-                        relevance_reason=None,
+                        relevance_reason=(
+                            "Низкая степень соответствия (score < 0.35)."
+                            if avg_score < 0.35
+                            else None
+                        ),
                         source_url=data.get("source_url"),
                         score=avg_score,
                     )
                 )
             answer = "Найдены каналы, которые чаще всего пишут по нужной теме."
         else:
+            logger.info(
+                "scenario4 qa sources: total_sources=%s (no strong-threshold)",
+                len(sources),
+            )
             evidence = "\n".join(f"- @{s.channel_username}: {s.summary}" for s in sources[:8] if s.summary)
             prompt = (
                 "Дай короткий ответ на вопрос строго по evidence. Не выдумывай факты.\n"
@@ -1718,7 +2531,11 @@ class IntelligenceService:
                     SemanticResultItem(
                         channel_username=s.channel_username,
                         title="Источник для ответа",
-                        relevance_reason="Использован как evidence для ответа на вопрос.",
+                        relevance_reason=(
+                            "Низкая степень соответствия (score < 0.35)."
+                            if float(s.score or 0.0) < 0.35
+                            else "Использован как evidence для ответа на вопрос."
+                        ),
                         source_url=s.source_url,
                         score=s.score,
                     )
@@ -1735,6 +2552,7 @@ class IntelligenceService:
             sources=sources,
             hits=hits,
             synthesis_placeholder=window_rows[0]["summary"] if window_rows and mode != "question_answering_over_posts" else None,
+            gate_matched_topics=allowed_gate_topics or None,
         )
 
     async def compare_channels(

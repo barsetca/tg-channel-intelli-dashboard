@@ -1,7 +1,7 @@
 from collections.abc import Sequence
 from datetime import datetime, timezone
 
-from sqlalchemy import Text, asc, cast, desc, or_, select
+from sqlalchemy import Text, asc, cast, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import expression
 
@@ -118,6 +118,73 @@ class ChannelRepository(BaseRepository[Channel]):
         result = await self._session.execute(select(Channel).where(Channel.id.in_(wanted)))
         by_id = {int(ch.id): ch for ch in result.scalars().all()}
         return [by_id[i] for i in wanted if i in by_id]
+
+    async def get_by_username(self, username: str) -> Channel | None:
+        uname = (username or "").strip().lstrip("@")
+        if not uname:
+            return None
+        result = await self._session.execute(select(Channel).where(Channel.username == uname))
+        return result.scalar_one_or_none()
+
+    async def map_by_username_casefold(self, usernames: Sequence[str]) -> dict[str, Channel]:
+        """Ключ — username в lower/casefold (без @). При коллизиях побеждает последняя строка из БД."""
+        wanted = {
+            (u or "").strip().lstrip("@").casefold()
+            for u in usernames
+            if (u or "").strip().lstrip("@")
+        }
+        if not wanted:
+            return {}
+        lowered = list(wanted)
+        result = await self._session.execute(
+            select(Channel).where(func.lower(Channel.username).in_(lowered))
+        )
+        out: dict[str, Channel] = {}
+        for ch in result.scalars().all():
+            key = (ch.username or "").strip().lstrip("@").casefold()
+            if key in wanted:
+                out[key] = ch
+        return out
+
+    async def list_datasets(self, *, limit: int, offset: int) -> tuple[list[Channel], int]:
+        rows = list(
+            (
+                await self._session.execute(
+                    select(Channel)
+                    .order_by(desc(Channel.created_at), desc(Channel.id))
+                    .limit(max(1, min(500, int(limit))))
+                    .offset(max(0, int(offset)))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        total = int((await self._session.execute(select(func.count()).select_from(Channel))).scalar_one())
+        return rows, total
+
+    async def list_topic_search_keywords(self, *, limit: int = 300) -> list[str]:
+        """Справочник тем из поля topic_search для выпадайки saved_catalog."""
+        stmt = (
+            select(Channel.topic_search)
+            .where(Channel.topic_search.is_not(None))
+            .where(Channel.topic_search != "")
+            .distinct()
+            .order_by(asc(Channel.topic_search))
+            .limit(max(1, min(1000, int(limit))))
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        out: list[str] = []
+        seen: set[str] = set()
+        for raw in rows:
+            val = str(raw or "").strip()
+            if not val:
+                continue
+            key = val.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(val)
+        return out
 
     def _catalog_query_base(
         self,
@@ -295,7 +362,13 @@ class ChannelRepository(BaseRepository[Channel]):
     ) -> Channel:
         """Создать или обновить канал по результатам discovery (сценарий 1)."""
         existing = await self.get_by_telegram_id(telegram_id)
+        # В datasets сначала может существовать draft с synthetic telegram_id.
+        # При discovery приходят реальные поля канала; если username совпал,
+        # обновляем существующую строку вместо создания дубликата.
+        if existing is None and username:
+            existing = await self.get_by_username(username)
         if existing is not None:
+            existing.telegram_id = telegram_id
             if username is not None:
                 existing.username = username
             if title is not None:

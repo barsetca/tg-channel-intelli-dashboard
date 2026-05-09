@@ -1,237 +1,199 @@
-# Архитектура AI pipeline для анализа Telegram-каналов
+# Архитектура AI pipeline для Telegram Channel Intelligence Dashboard
 
-Документ фиксирует **целевую сервисную архитектуру** под OpenAI API, с явным ответом на вопросы: используются ли **RAG** и **tools**, какие **стадии pipeline**, что лежит в **SQL** и что в **векторной БД**, какие **библиотеки** и почему. Это не обязательно уже весь реализованный код репозитория — это **направление проектирования**, согласованное с текущими моделями (`Analysis`, `Recommendation`, `Post`, `Channel`, Qdrant в зависимостях).
+Документ описывает **текущую реализацию** в репозитории: где вызывается OpenAI, где используется Qdrant и RAG, какие стадии есть у каждого сценария, и как это связано с SQL. Отдельно отмечаются **общие принципы** (контракты Pydantic, аудит), которые сохраняются при доработках.
 
 ---
 
 ## 1. Цели и ограничения
 
-| Цель | Как архитектура это поддерживает |
-|------|----------------------------------|
-| Воспроизводимость анализов | Версионированные промпты, фиксация `llm_model`, сырые входы в `input_refs_json`, результат в `result_json`. |
-| Контроль качества | Отдельная стадия валидации + схемный контракт (Pydantic) + явный **confidence**. |
-| Стоимость и предсказуемость | LLM только на стадиях, где нужен язык; метрики и фильтры — Python; ограничение контекста в `ContextBuilder`. |
-| Расширение без «зоопарка» | Линейный pipeline с чёткими границами; при росте — подключаются RAG и новые tools без смены парадигмы. |
+| Цель | Как это поддерживается в коде |
+|------|--------------------------------|
+| Воспроизводимость | Запись прогонов в `analyses`, `audit_runs` / `audit_run_items`, `search_runs`; JSON-артефакты в полях `result_json` / `snapshot_json`. |
+| Контроль качества | Pydantic-схемы на выходе LLM там, где используется structured output; эвристики + `needs_review` до дорогих вызовов. |
+| Предсказуемая стоимость | LLM не на каждом HTTP-запросе подряд: есть чисто детерминированные ветки, fallback без ключа, ранние `needs_review`. |
+| Расширяемость | Несколько независимых «потоков» (анализ канала, планировщик поиска, семантика, discovery-оркестратор); опциональный RAG-хук в анализе канала. |
 
-Ограничение из продуктовой логики: **не** опираться на тяжёлый agent-framework как обязательную основу MVP; оркестрация остаётся в коде приложения (FastAPI / worker), чтобы проще тестировать и объяснять пайплайн на защите.
-
----
-
-## 2. Используются ли RAG и tools?
-
-### 2.1. RAG (Retrieval-Augmented Generation)
-
-**Да, предполагается — выборочно**, не как «единственный мозг» приложения.
-
-| Сценарий | Нужен ли RAG | Почему |
-|----------|--------------|--------|
-| Сводка / аудит **одного** канала по уже загруженным постам в SQL | Часто **нет**: контекст собирается запросом в БД и укладывается в окно (возможно с summarization). | Данные уже «ваши»; retrieval не добавляет новых фактов. |
-| Вопросы **по корпусу** многих каналов / истории («что писали про X за квартал», «похожие формулировки») | **Да** | Полный перебор SQL по смыслу невозможен; нужен **семантический поиск** → эмбеддинги → top‑k чанков → ответ LLM. |
-| Рекомендации «похожий канал» по смыслу профиля | **Да** (или гибрид) | Векторное сравнение профилей / summary эффективнее чистого SQL по тексту. |
-
-**Вывод:** RAG — это **слой retrieval поверх векторного индекса** (у вас в стеке **Qdrant**), который подмешивает найденные фрагменты в промпт **определённых** стадий (например ответ semantic search, расширение контекста для recommendation). Для одиночного канала pipeline может **обойтись без** вызова Qdrant.
-
-### 2.2. Tools (инструменты для LLM / для оркестратора)
-
-**Да, предполагается** в смысле **выполняемых функций с доступом к данным и внешним системам**, а не обязательно в смысле «OpenAI Function Calling на каждом шаге».
-
-Два допустимых режима (можно комбинировать):
-
-1. **Оркестратор вызывает tools** (рекомендуется для MVP): Python после стадии Planner читает план и вызывает зарегистрированные функции (`fetch_posts`, `compute_metrics`, `qdrant_search`, …). LLM не «сам ходит» в БД — меньше риска и проще аудит.
-2. **Function calling / Responses API** (опционально позже): модель возвращает `tool_calls` → сервер выполняет → возвращает результат в диалог. Имеет смысл, если появятся интерактивные multi-turn сценарии.
-
-**Список типовых tools (логические роли):**
-
-| Tool | Назначение |
-|------|------------|
-| `telegram_context` / загрузка постов | Уже частично покрыто Telethon-слоем + записью в SQL; pipeline читает готовые `Post`. |
-| `channel_metrics` | Детерминированные метрики (`app.services.channel_metrics`) — не LLM. |
-| `sql_filter` | Выборки по датам, `channel_id`, лимиты — SQL. |
-| `vector_search` | Qdrant: top‑k чанков по запросу пользователя или по профилю канала. |
-| `persist_analysis` | Сохранение `Analysis` / `Recommendation`. |
-
-Итог: **tools обязательны как концепция исполнителей**; физически на старте они могут быть **обычными Python-функциями**, вызываемыми оркестратором по структурированному плану, без обязательного function calling.
+Ограничение: оркестрация критичных цепочек остаётся **в коде приложения** (FastAPI + in-process `OrchestrationCoordinator`), без обязательного agent-framework.
 
 ---
 
-## 3. Стадии pipeline (порядок и ответственность)
+## 2. Карта AI-подсистем (что где живёт в коде)
 
-Ниже — **логический** конвейер одного «запуска анализа» (один `analyzer_id`, один субъект `channel` | `post` | `snapshot`). Ветвления: только если Validation требует дозагрузки данных или блокирует LLM.
+В репозитории **не один** монолитный pipeline, а несколько согласованных подсистем:
+
+| Подсистема | Назначение | Ключевые модули |
+|------------|------------|-----------------|
+| **Аудит канала (analyzer `channel_audit_v1`)** | Глубокий отчёт по одному каналу и постам из SQL: план → валидация → summary → JSON-аудит → рекомендации. | `app/ai/orchestration/pipeline.py` (`ChannelAnalysisPipeline`), `app/ai/stages/*`, промпты `app/ai/prompts/channel_audit_v1/*.j2` |
+| **Планирование поиска каналов** | Нормализация формы поиска в `SearchPlannerOutput` (тема, count, подписчики, confidence). | `app/services/channel_search_planner.py` (`plan_channel_search`, `merge_planner_with_user_request`) |
+| **Quality gate поиска** | «Слишком общий запрос», конфликт темы и `extra_conditions` (LLM при непустом extra и наличии ключа). | `app/services/intelligence_service.py` (`_manual_review_too_broad`, `_review_extra_conditions`, `search_channels`) |
+| **Discovery (Telegram live)** | Фоновая цепочка после постановки job: planner → Telethon → SQLite + audit → метрики → **короткий LLM-лейбл темы** → **векторный индекс профилей**. | `app/orchestration/coordinator.py`, `app/orchestration/discovery_pipeline.py` |
+| **Сводка постов (сценарий 3)** | Эмбеддинги и upsert **сводок постов** и **окон контента** в Qdrant для последующей семантики. | `app/services/intelligence_service.py` (ветки scenario 3), `app/integrations/qdrant_client.py` |
+| **Семантический поиск (сценарий 4)** | Маршрутизация запроса → embedding вопроса → поиск в Qdrant → (в режиме QA) **LLM по evidence**. | `semantic_search_scenario4` в `intelligence_service.py` |
+| **Сравнение каналов (сценарий 5)** | Сначала **детерминированные** метрики и эвристики; при наличии ключа — **один LLM-вызов** для текстовой сводки сравнения. | `compare_channels` в `intelligence_service.py` |
+
+Точка входа для «классического» AI-аудита в коде задокументирована в docstring `ChannelAnalysisPipeline` (`app/ai/orchestration/pipeline.py`).
+
+---
+
+## 3. RAG, tools и векторная БД — как это устроено сейчас
+
+### 3.1. RAG (Retrieval-Augmented Generation)
+
+**Реализовано явно** в сценарии 4 (семантический поиск):
+
+1. Запрос пользователя превращается в вектор (OpenAI Embeddings).
+2. Из Qdrant извлекаются top‑k точек из коллекций с данными сценария 3.
+3. Для режима ответа на вопрос по корпусу контент **склеивается в evidence** и передаётся в chat completion с инструкцией отвечать только по evidence.
+
+В **аудите канала** (`ChannelAnalysisPipeline`) RAG **опционален**: после стадии Planner, если `plan.use_rag` и в `ChannelPipelineInput` передан `rag_fetcher`, в контекст добавляются `bundle.rag_snippets` (см. `ChannelPipelineInput` в `app/ai/stages/context_builder.py`). В типовом вызове из API fetcher может быть `None` — тогда Qdrant для этого прогона не используется.
+
+### 3.2. «Tools»
+
+В смысле **выполняемых функций**, а не обязательного OpenAI Function Calling:
+
+- SQL / репозитории, Telethon, расчёт метрик, запись аудита, планировщик поиска, Qdrant search/upsert — вызываются из Python до/после LLM.
+
+Function calling как API-модели **не является обязательной основой** текущего кода.
+
+### 3.3. Qdrant: зачем и какие коллекции
+
+| Коллекция (имя в коде) | Кто заполняет | Зачем |
+|------------------------|---------------|--------|
+| `telegram_post_summaries` | Сценарий 3 (сводка постов) | Семантический поиск по **кратким сводкам постов** |
+| `telegram_channel_windows` | Сценарий 3 | Семантика по **агрегированным окнам** контента канала |
+| `telegram_channel_profiles` | Стадия `run_vector_stage` в discovery после live-поиска | Лёгкий **профиль канала** (title/description/topics) для сценария похожих каналов и смежной семантики |
+
+Связь с SQL: в payload точек хранятся `channel_id`, `channel_username`, идентификаторы постов — полные факты при необходимости поднимаются из SQLite.
+
+Дефолтная коллекция в настройках (`qdrant_collection_name`, например `channel_messages`) используется как базовое имя/наследие конфигурации; сценарии 3–4 и discovery работают с **именованными** коллекциями выше.
+
+---
+
+## 4. Подсистема «аудит канала»: `ChannelAnalysisPipeline`
+
+Линейный конвейер для analyzer `channel_audit_v1`:
 
 ```mermaid
 flowchart TD
-  subgraph deterministic[Детерминированно Python]
-    S0[Stage 0: ContextBuilder]
-    S2[Stage 2: ValidationLayer]
-    T[Tools: SQL / metrics / Qdrant]
-  end
-  subgraph llm[Вызовы OpenAI]
-    S1[Stage 1: LLM Planner]
-    S3[Stage 3: Summarization]
-    S4[Stage 4: Structured JSON output]
-    S5[Stage 5: Recommendation copy + rank]
-  end
-  S0 --> S1
-  S1 --> S2
-  S2 -->|при необходимости| T
-  T --> S0
-  S2 -->|pass| S3
-  S3 --> S4
-  S4 --> S5
-  S5 --> P[(Persist: Analysis / Recommendation)]
+  S0[ContextBuilder: PostSnippet из SQL] --> S1[Planner LLM]
+  S1 --> RAG{plan.use_rag и rag_fetcher?}
+  RAG -->|да| R[Qdrant / внешний retrieval]
+  RAG -->|нет| S2
+  R --> S2[Validation rules]
+  S2 -->|BLOCK| X[PipelineValidationBlockedError]
+  S2 -->|pass| S3[Summarization LLM]
+  S3 --> S4[Structured audit JSON]
+  S4 --> S5[Recommendations LLM]
+  S5 --> OUT[PipelineRunResult → Analysis.result_json]
 ```
 
-| № | Стадия | LLM? | Вход | Выход |
-|---|--------|------|------|--------|
-| 0 | **ContextBuilder** | Нет | `channel_id` / список постов, лимиты токенов, настройки | `ContextBundle`: тексты, метаданные, числовые метрики, флаги «мало данных» |
-| 1 | **LLM Planner** | Да | Запрос пользователя + `ContextBundle` (сжатый) | Структурированный **Plan**: шаги, нужен ли RAG, лимиты, `plan_confidence` (слабый сигнал) |
-| 2 | **ValidationLayer** | Опционально да | Plan + факты из SQL | `pass` / `warn` / `block` + причины; при `block` — стоп без лишних вызовов LLM |
-| 3 | **Summarization** | Да (может быть несколько вызовов) | Длинный корпус постов | Сжатые summary для следующих стадий |
-| 4 | **Structured output** | Да | Summary + метрики + (если план) фрагменты из RAG | JSON, строго по Pydantic-схеме артефакта (`analyzer_id`) |
-| 5 | **Recommendation engine** | Да и/или нет | Артефакт + метрики + (опционально) векторное сходство | Строки логики рекомендаций + запись в `Recommendation` |
+| № | Стадия | LLM? | Реализация |
+|---|--------|------|------------|
+| 0 | Контекст | Нет | `build_context_bundle` — обрезка текста, метрики постов, «достаточность данных» |
+| 1 | План | Да | `run_planner` + шаблон `channel_audit_v1/planner.j2` |
+| 1b | RAG (опционально) | Нет сам по себе | Вызов `rag_fetcher(plan, bundle)` → строки в `bundle.rag_snippets` |
+| 2 | Валидация | Нет (правила) | `run_validation` — может заблокировать дорогие стадии |
+| 3 | Сводка | Да | `run_summarization` |
+| 4 | Структурированный аудит | Да | `run_structured_audit` → `ChannelAuditArtifact` |
+| 5 | Рекомендации | Да | `run_recommendations` |
 
-**Персистентность:** после стадии 4 и/или 5 — обновление `Analysis` (`status`, `result_json`, `error_detail`), создание `Recommendation`, при необходимости — джобы на обновление эмбеддингов в Qdrant (отдельно от критического пути ответа пользователю).
+Персистенция: сервис анализа создаёт строку `Analysis`, вызывает `pipeline.run(...)`, сохраняет `result.to_result_dict()` в `result_json` (см. `IntelligenceService`, блок с `ChannelAnalysisPipeline()`).
 
----
-
-## 4. Что хранить в SQL и что в векторной БД (и почему)
-
-### 4.1. SQL (SQLite сейчас; принцип тот же для PostgreSQL)
-
-**Назначение:** источник правды, **факты**, связи, фильтры, идемпотентность, транзакции.
-
-| Сущность / данные | Почему SQL |
-|-------------------|------------|
-| `channels`, `posts` | Стабильные записи с FK, уникальность `(channel_id, telegram_message_id)`, индексы по дате. |
-| Числа: просмотры, пересылки, подписчики, даты | Точные фильтры и агрегаты; векторный поиск по числам неэффективен. |
-| `analyses` | Журнал прогонов, `analyzer_id`, `status`, JSON результата, связь с субъектом. |
-| `recommendations` | Выдача пользователю с типом, score, FK на анализ / поиск. |
-| `search_runs`, `audit_runs`, … | Сценарии продукта, воспроизводимость. |
-| `snapshots` | Срезы метрик во времени — структурированные данные. |
-
-### 4.2. Векторная БД (Qdrant)
-
-**Назначение:** **семантический индекс** — «похожесть по смыслу», RAG, кластеризация тем, поиск без точного совпадения слов.
-
-| Что индексировать | Почему не только SQL |
-|-------------------|----------------------|
-| Текст поста (чанки) или **summary** поста | Запросы вида «темы как у …», «где обсуждали инвестиции в …» |
-| **Channel profile** (текстовая сводка: о чём канал, стиль) | Сравнение каналов, поиск похожих |
-| Фрагменты отчётов / аудитов (опционально) | Поиск похожих кейсов по смыслу |
-
-| Что **не** дублировать в векторах как основной смысл | Почему |
-|-----------------------------------------------------|--------|
-| Сырые ID, только числа без текстового контекста | Им нечему быть «похожим» в embedding-пространстве; фильтрация — в SQL. |
-
-**Связка SQL ↔ Qdrant:** в payload точки Qdrant хранить **`channel_id` / `post_id`** (и при необходимости `analysis_id`) — после retrieval всегда можно подтянуть полные факты из SQL.
+Промпты: каталог `backend/app/ai/prompts/channel_audit_v1/` — `planner.j2`, `summarization_reduce.j2`, `structured_audit.j2`, `recommendations.j2`, `json_repair.j2`.
 
 ---
 
-## 5. Компоненты из ТЗ — расшифровка
+## 5. Поиск каналов и планировщик
 
-### 5.1. LLM Planner
+- **`plan_channel_search`** (`channel_search_planner.py`): developer-сообщение с инструкцией вернуть структурированный `SearchPlannerOutput`; user-сообщение — JSON всей формы. Без `OPENAI_API_KEY` — детерминированный fallback из полей формы.
+- После плана выполняется **`merge_planner_with_user_request`**: пересечение диапазонов подписчиков, ограничение `count` для `telegram_live` / `saved_catalog`.
+- Дополнительно (до запуска каталога/live): **`_manual_review_too_broad`** и при непустых **`extra_conditions`** — **`_review_extra_conditions`** (отдельный structured LLM-вызов для конфликта темы и доп. условий).
 
-- **Задача:** перевести намерение пользователя и контекст в **явный машиночитаемый план** (какие данные нужны, нужен ли semantic search, глубина истории).
-- **Не делает:** не пишет в БД, не вызывает Telegram напрямую (это tools / другие сервисы).
-- **Выход:** JSON по схеме `Plan` (Pydantic).
-
-### 5.2. Validation Layer
-
-- **Сначала правила:** минимальное число постов, максимальный размер контекста, запрещённые состояния (нет канала, пустой текст).
-- **Потом опционально LLM:** короткий вызов «соответствует ли план данным?» — только если правил недостаточно (экономия).
-- **Связь с confidence:** `block`/`warn` снижают итоговый confidence.
-
-### 5.3. Summarization
-
-- Отдельные промпты от Planner; при длине корпуса > окна — **map** (по батчам постов) + **reduce**.
-- Результат — текст для стадии Structured output, а не финальный JSON всего отчёта (меньше ошибок парсинга).
-
-### 5.4. Structured JSON Output
-
-- Один «главный» артефакт сценария (аудит, карточка, таблица полей) в строгой схеме.
-- **OpenAI Structured Outputs** (где доступно для выбранной модели) + **Pydantic** на стороне Python — двойное согласование контракта.
-- При ошибке парсинга: **одна** repair-попытка с узким системным промптом (не смешивать с сетевым ретраем).
-
-### 5.5. Recommendation Engine
-
-- **Вход:** структурированный артефакт + метрики + опционально список кандидатов из Qdrant.
-- **Логика:** жёсткие правила (например, не рекомендовать канал без N постов) + LLM для формулировок и ранжирования **или** чисто векторный top‑k с объяснением через LLM поверх найденных имён.
-- **Выход:** записи `Recommendation` + связь с `Analysis`.
+Это **отдельный** контур от `ChannelAnalysisPipeline`: другая схема ответа (`SearchPlannerOutput` в `app/ai/schemas/search_planner.py`), другой смысл запроса к LLM.
 
 ---
 
-## 6. Библиотеки: что использовать и почему
+## 6. Оркестрация discovery (Telegram live)
 
-Ниже — **минимальный разумный стек** под уже объявленные зависимости в `pyproject.toml`. Дополнения помечены как рекомендуемые для production-удобства.
+`OrchestrationCoordinator` выполняет этапы для job `telegram_channel_discovery` (см. `coordinator.py`):
 
-| Библиотека | Роль в архитектуре | Обоснование |
-|------------|-------------------|-------------|
-| **`openai` (официальный, async)** | Вызовы Chat Completions / Responses, structured outputs | Поддержка API, типы, async; не оборачивать без нужды в LangChain. |
-| **`pydantic` v2** (уже через FastAPI / settings) | Схемы Plan, AuditResult, …; `model_validate_json` | Единый язык контрактов с FastAPI; быстрая валидация после LLM. |
-| **`httpx`** (уже в проекте) | Побочные HTTP-вызовы, если появятся | Async-стек консистентен с OpenAI SDK. |
-| **`qdrant-client`** (уже в проекте) | Запись/поиск векторов, payload с FK в SQL | Уже выбрано в монорепо как vector store. |
-| **`sqlalchemy[asyncio]`** | Доступ к фактам, сохранение `Analysis` | Уже ядро backend. |
-| **`Jinja2`** (рекомендуется добавить зависимостью) | Шаблоны промптов по `analyzer_id` и версии | Логика отделена от кода; условные блоки, подстановка контекста. |
-| **`tenacity`** (рекомендуется добавить) | Ретраи 429/5xx, экспоненциальный backoff | Декларативно отделить транспортные повторы от repair JSON. |
-
-**Почему не LangChain / LangGraph по умолчанию:** для вашего объёма сценариев они дают мало уникального при высокой стоимости отладки и версионирования; явный pipeline проще покрыть тестами и объяснить. При росте сложности можно **точечно** вынести подграф (например только RAG-ветку) без переписывания всего backend.
+1. **planner** — подготовка параметров поиска (в т.ч. вызов планировщика в `discovery_pipeline`).
+2. **telethon_ingest** — получение кандидатов.
+3. **sqlite_persist** — upsert каналов в SQLite + строки **audit** (`audit_runs` / `audit_run_items` с `snapshot_json`).
+4. **metrics** — метрики по постам через Telethon.
+5. **ai_pipeline** — **`run_ai_stage`**: короткие chat-запросы к LLM для уточнения `primary_topic` по title/description (при наличии ключа).
+6. **vector_index** — **`run_vector_stage`**: эмбеддинг текстовых профилей и upsert в коллекцию **`telegram_channel_profiles`**.
 
 ---
 
-## 7. Prompt templates, schema validation, retry, confidence
+## 7. Сценарий 3: сводка постов → наполнение Qdrant
 
-### 7.1. Prompt templates
-
-- Файлы в репозитории: например `backend/app/ai/prompts/<analyzer_id>/v1/planner.j2`.
-- В метаданных прогона сохранять **`prompt_version`** (в `input_refs_json` или внутри `result_json`).
-
-### 7.2. Schema validation
-
-- Каждая стадия с JSON: своя Pydantic-модель.
-- Где возможно — генерация JSON **по схеме** на стороне OpenAI (меньше «битого» JSON).
-
-### 7.3. Retry mechanism
-
-| Тип сбоя | Поведение |
-|----------|-----------|
-| 429, 5xx, timeout, сеть | Exponential backoff, ограниченное число попыток (**tenacity** или своя обёртка). |
-| Невалидный JSON / Pydantic | Одна **repair**-попытка с явным списком ошибок валидатора; не считать это за «ещё один полный прогон». |
-
-### 7.4. Confidence scoring
-
-Композитный скор (пример сигналов):
-
-- достаточность данных (число постов, глубина дат) — **правила**;
-- успех валидации первого прохода;
-- успех парсинга JSON с первого ответа;
-- `plan_confidence` от модели — **низкий вес** (модели склонны завышать).
-
-Итог кладётся в `result_json` (и при эволюции схемы — в отдельные поля БД).
+При успешном сценарии сводки в Qdrant пишутся точки в **`telegram_post_summaries`** и **`telegram_channel_windows`** (тексты сводок и метаданные в payload). Это **подготовительный слой** для сценария 4: без данных в этих коллекциях семантический поиск возвращает `needs_review` с пояснением «сначала запустите резюмирование».
 
 ---
 
-## 8. Связь с существующими моделями БД
+## 8. Сценарий 4: семантический поиск (RAG end-to-end)
 
-- **`Analysis`**: один субъект (`channel_id` XOR `post_id` XOR `snapshot_id`), `analyzer_id`, `status`, `input_refs_json`, `result_json`, `llm_model`, `error_detail`.
-- **`Recommendation`**: потомки логики recommendation stage, связь с `source_analysis_id` (и при необходимости `search_run_id`).
-- **Qdrant**: не заменяет SQL; хранит вектор + payload с ключами для join к SQL.
+Упрощённая цепочка в `semantic_search_scenario4`:
 
----
-
-## 9. Краткий итог
-
-| Вопрос | Ответ |
-|--------|--------|
-| RAG? | **Да, точечно** — для вопросов по корпусу / похожести / расширения контекста через Qdrant; для «один канал в лимите окна» может не вызываться. |
-| Tools? | **Да** — как выполняемые функции (SQL, метрики, Qdrant, сохранение); на MVP оркестратор вызывает их по плану; function calling — опционально позже. |
-| Стадии | ContextBuilder → Planner → Validation → Summarization → Structured JSON → Recommendations → Persist. |
-| SQL vs вектор | **Факты и связи** в SQL; **семантический поиск и RAG** — Qdrant + payload с id из SQL. |
-| Библиотеки | `openai`, `pydantic`, `sqlalchemy`, `qdrant-client`; рекомендованы `Jinja2`, `tenacity`; без обязательного LangChain. |
-
-Дальнейшая детализация по конкретным `analyzer_id` и JSON-схемам — в отдельных спецификациях или в коде `app/ai/schemas/` по мере реализации.
+1. **Маршрутизация** `_semantic_route_mode` — эвристики «слишком общий», личные вопросы к модели, неясность пост vs канал.
+2. **Embedding** запроса: `openai.embeddings.create` с моделью из `Settings.openai_embedding_model`.
+3. **Поиск** в Qdrant: параллельно по `telegram_post_summaries` и `telegram_channel_windows`.
+4. **Результат**:
+   - режимы `post_search` / `channel_search` — в основном ранжирование и агрегация без большого LLM;
+   - режим вопроса по корпусу — **synthesis**: system «Ты аналитик. Отвечай только по данным evidence», user с вопросом и обрезанным evidence.
 
 ---
 
-## 10. Реализация в репозитории (эталон `channel_audit_v1`)
+## 9. Сценарий 5: сравнение каналов
 
-Рабочий каркас pipeline: пакет **`app/ai/`** — оркестратор `ChannelAnalysisPipeline`, стадии в `app/ai/stages/`, промпты Jinja2 в `app/ai/prompts/channel_audit_v1/`, клиент OpenAI с ретраями `app/ai/clients/openai_chat.py`, агрегация confidence `app/ai/confidence.py`. Точка входа: `await ChannelAnalysisPipeline().run(ChannelPipelineInput(...))` (см. docstring в `app/ai/orchestration/pipeline.py`). Юнит-тесты без сети: `tests/test_ai_pipeline_unit.py`.
+1. Сбор постов за окно (Telethon и/или SQLite), расчёт метрик (частота, охваты, ER, стабильность, тон, темы, коммерческая доля и т.д.).
+2. Детерминированные **strengths / recommendations** и `normalized_score`.
+3. Если задан `OPENAI_API_KEY`, один **LLM-вызов** переформулирует блок сравнительных «notes» на русском по компактному JSON метрик; при ошибке остаётся шаблонный текст.
+
+---
+
+## 10. SQL vs векторная БД (итог)
+
+- **SQLite**: каналы, посты, анализы, аудит, поисковые прогоны — источник истины и точные фильтры.
+- **Qdrant**: семантический индекс для поиска по смыслу, RAG в сценарии 4 и профили для discovery/похожих каналов; payload содержит ключи для join к SQL.
+
+---
+
+## 11. Библиотеки (факт из `pyproject.toml`)
+
+| Библиотека | Роль |
+|------------|------|
+| `openai` | Chat completions, embeddings, structured parses где используется `OpenAIStageClient` / прямые вызовы в сервисах. |
+| `pydantic` / `pydantic-settings` | Схемы запросов/ответов FastAPI и AI-артефактов. |
+| `jinja2` | Шаблоны промптов `*.j2` в `app/ai/prompts/`. |
+| `tenacity` | Ретраи в клиенте OpenAI (см. `app/ai/clients/openai_chat.py`). |
+| `qdrant-client` | `QdrantStore`, поиск и upsert. |
+| `sqlalchemy[asyncio]` | ORM и репозитории. |
+
+---
+
+## 12. Confidence, retry, версии промптов
+
+- **Аудит канала**: итоговый `confidence` агрегируется в `app/ai/confidence.py` из достаточности данных, валидации, успеха первого парсинга JSON, `plan_confidence` (с низким весом). Попадает в `PipelineRunResult.to_result_dict()`.
+- **Retry**: транспортные повторы — через `tenacity` в OpenAI-клиенте; «repair» JSON — отдельная логика в стадиях structured output при необходимости.
+- **Версии**: у `ChannelPipelineInput` есть `prompt_version` (по умолчанию `v1`); шаблоны лежат в каталоге `channel_audit_v1`.
+
+---
+
+## 13. Тесты
+
+- Юнит-тесты пайплайна аудита без сети: `backend/tests/test_ai_pipeline_unit.py`.
+
+---
+
+## 14. Краткий итог
+
+| Вопрос | Ответ по текущему коду |
+|--------|-------------------------|
+| Один pipeline на всё приложение? | **Нет**. Есть `ChannelAnalysisPipeline` для глубокого аудита, отдельные LLM-вызовы для поиска/валидации формы, discovery, сценариев 3–5. |
+| RAG? | **Да** в сценарии 4; **опционально** в аудите канала через `rag_fetcher` + `plan.use_rag`. |
+| Qdrant? | Коллекции `telegram_post_summaries`, `telegram_channel_windows`, `telegram_channel_profiles` (+ настройка `qdrant_collection_name` для наследия конфигурации). |
+| Где лежат промпты аудита? | `backend/app/ai/prompts/channel_audit_v1/*.j2` |
+
+Дальнейшая детализация по полям JSON конкретных ответов API — в `app/schemas/` и в Pydantic-моделях в `app/ai/schemas/`.

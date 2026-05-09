@@ -29,9 +29,21 @@ def get_health_service(
 
 
 def get_channel_service(
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> ChannelService:
-    return ChannelService(session)
+    coordinator = getattr(request.app.state, "orchestration_coordinator", None)
+    telegram = getattr(request.app.state, "telegram_service", None)
+    telethon_ok = getattr(request.app.state, "telegram_service", None) is not None
+    telethon_startup_failure = getattr(request.app.state, "telegram_startup_failure", None)
+    intelligence = IntelligenceService(
+        session,
+        coordinator=coordinator,
+        telegram=telegram,
+        telethon_live_available=telethon_ok,
+        telethon_startup_failure=telethon_startup_failure,
+    )
+    return ChannelService(session, intelligence=intelligence, coordinator=coordinator)
 
 
 def get_intelligence_service(

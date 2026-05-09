@@ -326,11 +326,15 @@ async def run_telethon_stage(
 async def run_sqlite_persist_stage(session: AsyncSession, job: Any) -> None:
     rows: list[dict[str, Any]] = job.transient.get("normalized_channels") or []
     repo = ChannelRepository(session)
+    started_at = datetime.now(timezone.utc)
+    input_payload = dict(job.payload)
 
     audit = AuditRun(
         audit_kind="channel_discovery",
+        action="telegram_live_discovery",
         status="running",
-        raw_user_input_json=dict(job.payload),
+        raw_user_input_json=input_payload,
+        input_json=input_payload,
         planner_output_json=dict(job.planner_output) if job.planner_output else None,
     )
     session.add(audit)
@@ -375,13 +379,16 @@ async def run_sqlite_persist_stage(session: AsyncSession, job: Any) -> None:
             )
         )
 
-    audit.status = "completed"
-    audit.result_summary_json = {
+    summary = {
         "channels_saved": len(rows),
         "orchestration_job_id": job.id,
         "audit_run_id": audit.id,
         "discovery_diagnostics": job.transient.get("discovery_diagnostics"),
     }
+    audit.status = "completed"
+    audit.result_summary_json = summary
+    audit.output_json = summary
+    audit.duration_ms = max(0, int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000))
     await session.commit()
     job.transient["persisted_channel_ids"] = channel_ids_ordered
     job.transient["audit_run_id"] = int(audit.id)

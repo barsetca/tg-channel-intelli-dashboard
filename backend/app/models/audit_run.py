@@ -29,6 +29,11 @@ class AuditRun(Base, TimestampMixin):
     audit_kind: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
 
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    action: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(nullable=True)
+    input_json: Mapped[dict | list | None] = mapped_column(JSON, nullable=True)
+    output_json: Mapped[dict | list | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text(), nullable=True)
 
     # Исходные поля формы / запрос пользователя (тематика, диапазоны и т.д.)
     raw_user_input_json: Mapped[dict | list | None] = mapped_column(JSON, nullable=True)

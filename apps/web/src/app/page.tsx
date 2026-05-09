@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { BarChart3, HeartPulse, Layers, LineChart, Search, Sparkles } from "lucide-react";
+import { BarChart3, ClipboardList, Database, FileJson, HeartPulse, Layers, LineChart, Search, Sparkles } from "lucide-react";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 
 const tiles = [
@@ -8,6 +8,12 @@ const tiles = [
     title: "Поиск каналов",
     desc: "Сценарий 1: поиск по сохраненному каталогу и Telegram с фильтрами.",
     icon: Search,
+  },
+  {
+    href: "/datasets",
+    title: "Наборы данных",
+    desc: "Работа с сохранёнными каналами как dataset: выбор, сбор, удаление, создание.",
+    icon: Database,
   },
   {
     href: "/channel-analysis",
@@ -26,6 +32,18 @@ const tiles = [
     title: "Сравнение каналов",
     desc: "Сценарий 5: сравнение нескольких каналов по ключевым метрикам.",
     icon: BarChart3,
+  },
+  {
+    href: "/showcase",
+    title: "Витрина данных",
+    desc: "Отдельный раздел с нормализованными records, временем сбора и источником.",
+    icon: FileJson,
+  },
+  {
+    href: "/manual-review",
+    title: "Требует проверки",
+    desc: "Журнал случаев needs_review с фильтрами по источнику: audit, search, analyze.",
+    icon: ClipboardList,
   },
   {
     href: "/health",
