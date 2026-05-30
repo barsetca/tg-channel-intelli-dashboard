@@ -31,6 +31,8 @@ Qdrant и эмбеддинги (`VectorService`, коллекции `telegram_*`
 
 Telethon (user session, FloodWait, HTTP-вход): [docs/TELEGRAM_TELETHON.md](docs/TELEGRAM_TELETHON.md).
 
+Публикация в Telegram (OpenAI + Telethon, предпросмотр, env): [docs/PUBLISHING.md](docs/PUBLISHING.md).
+
 ## REST API v1
 
 Префикс приложения **`/api/v1`**. После запуска: Swagger **`/docs`**, ReDoc **`/redoc`** (корень приложения без префикса v1 для UI).
@@ -55,6 +57,7 @@ Telethon (user session, FloodWait, HTTP-вход): [docs/TELEGRAM_TELETHON.md](d
 | `POST` | `/analyze/by-handle` | **2** — анализ по `@name` / `t.me/...` через Telethon |
 | `GET` | `/analyses` | Список отчётов; `?channel_id=&limit=` |
 | `GET` | `/analyses/{analysis_id}` | Детальный сохранённый отчёт |
+| `GET` | `/analyses/{analysis_id}/pdf` | PDF отчёта анализа (генерация on-the-fly, `Content-Disposition: inline`, без файлового кеша) |
 | `DELETE` | `/analyses/{analysis_id}` | Удаление записи из `analyses` |
 | `POST` | `/semantic-search` | **4** — семантика в Qdrant (`telegram_post_summaries` и `telegram_channel_windows`) после сценария 3 |
 | `GET` | `/recommendations/{channel_id}` | **6** — похожие каналы (Qdrant: сводки, окна и `telegram_channel_profiles`, fallback по каталогу) |
@@ -64,6 +67,14 @@ Telethon (user session, FloodWait, HTTP-вход): [docs/TELEGRAM_TELETHON.md](d
 | `GET` | `/manual-review`, `/manual-review/export` | Журнал режима **manual_review** (**8**) |
 | `GET` | `/health` | Проверка работоспособности API |
 | `GET`/`POST`/`DELETE` | `/channels`, `/channels/{channel_id}`, `/channels/{channel_id}/collect` | MVP каталога: список, создание, удаление канала из каталога, фон **`collect`** (см. OpenAPI summary) |
+| `GET` | `/publishing/channels` | **Публикация**: каналы, куда user session может постить |
+| `GET` | `/publishing/author-style` | Образцы стиля автора для LLM |
+| `POST` | `/publishing/generate` | Генерация текста + изображения (без Telegram) |
+| `POST` | `/publishing/publish-generated` | Генерация + публикация в канал |
+| `POST` | `/publishing/publish-manual` | Ручная публикация / «Опубликовать предпросмотр» |
+| `POST` | `/publishing/send-message` | Сообщение в чат от user session |
+
+Подробнее: [docs/PUBLISHING.md](docs/PUBLISHING.md).
 
 Сводные подсказки к маршрутам для разработчиков — в docstring/OpenAPI каждого эндпоинта в каталоге [`app/api/v1/endpoints/`](app/api/v1/endpoints/).
 

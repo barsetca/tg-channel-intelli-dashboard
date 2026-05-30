@@ -195,5 +195,6 @@ flowchart TD
 | RAG? | **Да** в сценарии 4; **опционально** в аудите канала через `rag_fetcher` + `plan.use_rag`. |
 | Qdrant? | Коллекции `telegram_post_summaries`, `telegram_channel_windows`, `telegram_channel_profiles` (+ настройка `qdrant_collection_name` для наследия конфигурации). |
 | Где лежат промпты аудита? | `backend/app/ai/prompts/channel_audit_v1/*.j2` |
+| Публикация постов в канал? | **Отдельный модуль** [`app/publishing/`](../app/publishing/) — не входит в `ChannelAnalysisPipeline`; промпт [`post_draft.j2`](../app/ai/prompts/publishing/post_draft.j2), Images API, Telethon `publish_to_channel`. См. [PUBLISHING.md](PUBLISHING.md). |
 
 Дальнейшая детализация по полям JSON конкретных ответов API — в `app/schemas/` и в Pydantic-моделях в `app/ai/schemas/`.

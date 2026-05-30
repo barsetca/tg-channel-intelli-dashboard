@@ -78,7 +78,13 @@ class _StubIntelligenceService:
     async def list_channel_analysis_history(self, channel_id: Any = None, limit: int = 50) -> list[Any]:
         return []
 
-    async def get_saved_channel_analysis(self, analysis_id: int) -> tuple[Any, str | None]:
+    async def get_saved_channel_analysis(
+        self,
+        *,
+        analysis_id: int,
+        lightweight: bool = False,
+    ) -> tuple[Any, str | None]:
+        _ = lightweight
         return None, "not_found"
 
     async def delete_channel_analysis(self, analysis_id: int) -> tuple[bool, str | None]:

@@ -10,6 +10,7 @@ import { Alert } from "@/components/ui/alert";
 import { ActivityBars } from "@/components/charts/activity-bars";
 import { TrendArea } from "@/components/charts/trend-area";
 import { AnalysisReportView } from "@/components/channel-analysis-report-view";
+import { ChannelAnalysisPdfButton } from "@/components/channel-analysis-pdf-button";
 
 export function ChannelAnalyzePanel({ channel }: { channel: ChannelDetail }) {
   const [loading, setLoading] = useState(false);
@@ -71,10 +72,15 @@ export function ChannelAnalyzePanel({ channel }: { channel: ChannelDetail }) {
         ) : null}
         {result ? (
           <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950">
-            <p>
-              <span className="text-zinc-500">Анализ #</span> {result.analysis_id}{" "}
-              <span className="text-zinc-500">· Статус:</span> {result.status}
-            </p>
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <p>
+                <span className="text-zinc-500">Анализ #</span> {result.analysis_id}{" "}
+                <span className="text-zinc-500">· Статус:</span> {result.status}
+              </p>
+              {result.analysis_id > 0 && result.report ? (
+                <ChannelAnalysisPdfButton analysisId={result.analysis_id} />
+              ) : null}
+            </div>
             <p className="mt-2 text-zinc-700">{result.message}</p>
             {result.report ? <AnalysisReportView report={result.report} /> : null}
           </div>

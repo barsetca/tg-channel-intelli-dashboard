@@ -31,6 +31,27 @@ class TelegramChannelFullInfo(BaseModel):
         description="Число подписчиков, если передано Telegram (может быть None для приватных/ограниченных случаев)",
     )
     is_broadcast: bool = True
+    created_at_utc: datetime | None = Field(
+        default=None,
+        description="Channel.date из MTProto; в отчёте сравнивается с датой постов (берётся более ранняя)",
+    )
+
+
+class PublishableChannelBrief(BaseModel):
+    """Канал, в который текущая сессия может публиковать посты."""
+
+    telegram_channel_id: int
+    username: str | None = None
+    title: str | None = None
+    is_broadcast: bool = True
+
+
+class TelegramPublishResult(BaseModel):
+    telegram_message_id: int
+    peer_ref: str
+    published_at_utc: datetime
+    had_image: bool
+    had_text: bool
 
 
 class TelegramPostBrief(BaseModel):

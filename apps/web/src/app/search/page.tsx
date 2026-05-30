@@ -276,7 +276,11 @@ export default function SearchPage() {
       count: isSaved ? (showAllSaved ? null : count) : Math.max(1, Math.min(15, count)),
       min_subscribers: isSaved ? (minSub === "" ? null : minSub) : null,
       max_subscribers: isSaved ? (maxSub === "" ? null : maxSub) : null,
-      channel_type: channelType,
+      channel_type: isSaved
+        ? channelType
+        : liveChannelMode === "new"
+          ? "new_only"
+          : "all",
       live_channel_mode: isSaved ? "new" : liveChannelMode,
       sort_by: isSaved ? sortBy : "subscriber_count",
       sort_order: isSaved ? sortOrder : "desc",

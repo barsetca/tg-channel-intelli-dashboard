@@ -30,12 +30,18 @@ from telethon.errors.rpcerrorlist import (
     UserDeactivatedError,
 )
 from telethon.sessions import StringSession
-from telethon.tl.functions.channels import GetFullChannelRequest
+from telethon.tl.functions.channels import GetAdminedPublicChannelsRequest, GetFullChannelRequest
 from telethon.tl.functions.contacts import SearchRequest
 from telethon.tl.types import Channel, Message
 
 from app.core.config import Settings, get_settings
-from app.integrations.telethon.dto import TelegramChannelFullInfo, TelegramPostBrief, TelegramSearchHit
+from app.integrations.telethon.dto import (
+    PublishableChannelBrief,
+    TelegramChannelFullInfo,
+    TelegramPostBrief,
+    TelegramPublishResult,
+    TelegramSearchHit,
+)
 from app.integrations.telethon.exceptions import (
     TelegramAuthRequiredError,
     TelegramConfigurationError,
@@ -45,6 +51,7 @@ from app.integrations.telethon.exceptions import (
     coerce_to_telegram_error,
     map_telethon_error,
 )
+from app.integrations.telethon.media_bytes import image_bytes_for_telegram_photo
 from app.integrations.telethon.rate_limit import run_with_optional_flood_retry
 from app.integrations.telethon.session_source import (
     effective_string_session,
@@ -394,6 +401,7 @@ class TelethonUserSessionService:
         about = getattr(fc, "about", None)
         subs = getattr(fc, "participants_count", None)
 
+        entity_date = _normalize_utc(getattr(ch, "date", None))
         return TelegramChannelFullInfo(
             telegram_channel_id=int(ch.id),
             username=getattr(ch, "username", None),
@@ -401,6 +409,7 @@ class TelethonUserSessionService:
             about=str(about) if about else None,
             participants_count=int(subs) if subs is not None else None,
             is_broadcast=bool(getattr(ch, "broadcast", False)),
+            created_at_utc=entity_date,
         )
 
     async def fetch_recent_posts(
@@ -433,6 +442,35 @@ class TelethonUserSessionService:
         ordered = sorted(material, key=lambda m: (m.date, m.id))
         return [self._msg_to_brief(m) for m in ordered]
 
+    async def fetch_channel_post_history(
+        self,
+        identifier: str | int,
+        *,
+        limit: int = 5000,
+    ) -> list[TelegramPostBrief]:
+        """
+        История сообщений канала (хронологический порядок) для метрик отчёта.
+        Ограничение ``limit`` защищает от слишком долгого обхода на очень активных каналах.
+        """
+        entity = await self.resolve_channel(identifier)
+        capped = max(1, min(limit, 10000))
+
+        async def _iter():
+            client = self._ensure_client_ready()
+            out: list[TelegramPostBrief] = []
+            async for msg in client.iter_messages(entity, limit=capped):
+                if not isinstance(msg, Message):
+                    continue
+                if getattr(msg, "action", None) is not None:
+                    continue
+                if getattr(msg, "date", None) is None:
+                    continue
+                out.append(self._msg_to_brief(msg))
+            return out
+
+        briefs = await self._guarded_call("iter_messages", _iter)
+        return sorted(briefs, key=lambda p: (p.date_utc, p.telegram_message_id))
+
     @staticmethod
     def _msg_to_brief(msg: Message) -> TelegramPostBrief:
         text = getattr(msg, "message", None) or None
@@ -449,4 +487,130 @@ class TelethonUserSessionService:
             text=text,
             views=getattr(msg, "views", None),
             forwards=getattr(msg, "forwards", None),
+        )
+
+  # --- Публикация и личные сообщения -----------------------------------------
+
+    async def list_publishable_channels(self) -> list[PublishableChannelBrief]:
+        """
+        Каналы, где сессия может публиковать: админские публичные + broadcast-диалоги с правом поста.
+        """
+        client = self._ensure_client_ready()
+        seen: set[int] = set()
+        out: list[PublishableChannelBrief] = []
+
+        def _append(ch: Channel) -> None:
+            tid = int(ch.id)
+            if tid in seen:
+                return
+            if not bool(getattr(ch, "broadcast", False)):
+                return
+            seen.add(tid)
+            out.append(
+                PublishableChannelBrief(
+                    telegram_channel_id=tid,
+                    username=getattr(ch, "username", None),
+                    title=getattr(ch, "title", None),
+                    is_broadcast=True,
+                )
+            )
+
+        async def _admined():
+            return await client(GetAdminedPublicChannelsRequest())
+
+        raw = await self._guarded_call("GetAdminedPublicChannels", _admined)
+        for ch in getattr(raw, "chats", []) or []:
+            if isinstance(ch, Channel):
+                _append(ch)
+
+        me = await client.get_me()
+
+        async def _scan_dialogs():
+            async for dialog in client.iter_dialogs(limit=200):
+                ent = dialog.entity
+                if not isinstance(ent, Channel) or not ent.broadcast:
+                    continue
+                if int(ent.id) in seen:
+                    continue
+                try:
+                    part = await client.get_permissions(ent, me)
+                except Exception:  # noqa: BLE001
+                    continue
+                if part.is_creator or (part.is_admin and part.post_messages):
+                    _append(ent)
+
+        await self._guarded_call("iter_dialogs_publishable", _scan_dialogs)
+        out.sort(key=lambda x: (x.title or x.username or "").casefold())
+        return out
+
+    async def publish_to_channel(
+        self,
+        identifier: str | int,
+        *,
+        text: str | None = None,
+        image_bytes: bytes | None = None,
+    ) -> TelegramPublishResult:
+        """Публикация в канал: фото с подписью, только фото или только текст."""
+        entity = await self.resolve_channel(identifier)
+        caption = (text or "").strip() or None
+        client = self._ensure_client_ready()
+        ref = getattr(entity, "username", None) or str(identifier)
+
+        if image_bytes:
+            photo_file, photo_mime = image_bytes_for_telegram_photo(image_bytes)
+
+            async def _send_photo():
+                return await client.send_file(
+                    entity,
+                    photo_file,
+                    caption=caption,
+                    force_document=False,
+                    mime_type=photo_mime,
+                )
+
+            msg = await self._guarded_call("send_file", _send_photo)
+        elif caption:
+            async def _send_text():
+                return await client.send_message(entity, caption)
+
+            msg = await self._guarded_call("send_message", _send_text)
+        else:
+            raise TelegramInvalidIdentifierError("Нужен текст поста и/или изображение.")
+
+        if not isinstance(msg, Message):
+            raise TelegramTelethonError("Telegram не вернул сообщение после публикации.")
+        dt = _normalize_utc(getattr(msg, "date", None)) or datetime.now(timezone.utc)
+        return TelegramPublishResult(
+            telegram_message_id=int(msg.id),
+            peer_ref=str(ref),
+            published_at_utc=dt,
+            had_image=bool(image_bytes),
+            had_text=bool(caption),
+        )
+
+    async def send_user_message(self, identifier: str | int, *, text: str) -> TelegramPublishResult:
+        """Личное сообщение или сообщение в чат от имени пользователя сессии."""
+        body = text.strip()
+        if not body:
+            raise TelegramInvalidIdentifierError("Пустой текст сообщения.")
+        client = self._ensure_client_ready()
+        entity = await self._guarded_call(
+            "get_entity",
+            lambda: client.get_entity(identifier),
+        )
+
+        async def _send():
+            return await client.send_message(entity, body)
+
+        msg = await self._guarded_call("send_message", _send)
+        if not isinstance(msg, Message):
+            raise TelegramTelethonError("Telegram не вернул сообщение.")
+        dt = _normalize_utc(getattr(msg, "date", None)) or datetime.now(timezone.utc)
+        ref = getattr(entity, "username", None) or str(identifier)
+        return TelegramPublishResult(
+            telegram_message_id=int(msg.id),
+            peer_ref=str(ref),
+            published_at_utc=dt,
+            had_image=False,
+            had_text=True,
         )

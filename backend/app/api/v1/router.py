@@ -12,6 +12,7 @@ from app.api.v1.endpoints import (
     health,
     manual_review,
     orchestration_jobs,
+    publishing,
     recommendations,
     search_channels,
     semantic_search,
@@ -44,3 +45,4 @@ api_router.include_router(data_showcase.router, prefix="/data-showcase", tags=["
 api_router.include_router(manual_review.router, prefix="/manual-review", tags=["manual-review"])
 api_router.include_router(telegram_auth.router, prefix="/telegram", tags=["telegram-auth"])
 api_router.include_router(orchestration_jobs.router, prefix="/orchestration", tags=["orchestration"])
+api_router.include_router(publishing.router, prefix="/publishing", tags=["publishing"])

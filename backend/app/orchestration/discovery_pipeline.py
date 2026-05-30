@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections import Counter
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Sequence
 from uuid import NAMESPACE_URL, uuid5
 
 from qdrant_client.models import PayloadSchemaType
@@ -38,8 +39,12 @@ _MAX_SEARCH_LIMIT = 100
 _MAX_UNIQUE_CANDIDATES = 450
 _MAX_QUERY_VARIANTS = 14
 _MAX_QUERY_VARIANTS_STRICT = 28
+_NEW_ONLY_EXTRA_VARIANT_CAP = 48
+_NEW_ONLY_VARIANT_BATCH = 6
+_NEW_ONLY_MAX_EXTRA_ROUNDS = 14
 _ENRICH_CONCURRENCY = 6
 _ENRICH_BATCH = 18
+_TOPIC_TOKEN_RE = re.compile(r"[\wа-яА-ЯёЁ]+", re.UNICODE)
 
 
 def _subscriber_filters_active(merged: dict[str, Any] | None) -> bool:
@@ -49,7 +54,109 @@ def _subscriber_filters_active(merged: dict[str, Any] | None) -> bool:
     return isinstance(ms, int) or isinstance(xs, int)
 
 
-def _unique_hit_collection_cap(target: int, merged: dict[str, Any]) -> int:
+def _topic_tokens(text: str) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for token in _TOPIC_TOKEN_RE.findall(text or ""):
+        key = token.casefold()
+        if len(key) < 3 or key in seen:
+            continue
+        seen.add(key)
+        out.append(token)
+    return out
+
+
+def _min_new_candidate_pool(target: int) -> int:
+    """Сколько «свежих» (не в SQLite) кандидатов собрать до обогащения."""
+    return max(120, target * 15)
+
+
+def _new_only_extra_variants(planner_topic: str, user_topic: str) -> list[str]:
+    """
+    Дополнительные формулировки contacts.Search, когда базовые варианты уже отданы в каталог.
+
+    Telegram не пагинирует поиск — расширяем запросы по словам и перестановкам темы.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def add(q: str) -> None:
+        q = (q or "").strip()
+        if len(q) < 2:
+            return
+        key = q.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(q)
+
+    tokens: list[str] = []
+    for raw in (planner_topic.strip(), user_topic.strip()):
+        tokens.extend(_topic_tokens(raw))
+    tokens = list(dict.fromkeys(tokens))
+
+    for token in tokens:
+        add(token)
+        add(f"{token} канал")
+        add(f"канал {token}")
+        add(f"{token} telegram")
+
+    for left in tokens:
+        for right in tokens:
+            if left == right:
+                continue
+            add(f"{left} {right}")
+            add(f"{right} {left}")
+
+    for raw in (planner_topic.strip(), user_topic.strip()):
+        if len(raw) < 4:
+            continue
+        add(f"топ {raw}")
+        add(f"лучшие {raw}")
+        add(f"{raw} услуги")
+        add(f"{raw} москва")
+        add(f"{raw} спб")
+
+    return out[:_NEW_ONLY_EXTRA_VARIANT_CAP]
+
+
+def _count_fresh_candidates(hits: Sequence[TelegramSearchHit], existing_in_db: set[int]) -> int:
+    return sum(1 for h in hits if int(h.telegram_channel_id) not in existing_in_db)
+
+
+def _append_unique_hits(
+    hits: Sequence[TelegramSearchHit],
+    *,
+    seen_hit_ids: set[int],
+    ordered_hits: list[TelegramSearchHit],
+    max_total: int,
+) -> int:
+    added = 0
+    for h in hits:
+        tid = int(h.telegram_channel_id)
+        if tid in seen_hit_ids:
+            continue
+        if len(ordered_hits) >= max_total:
+            break
+        seen_hit_ids.add(tid)
+        ordered_hits.append(h)
+        added += 1
+    return added
+
+
+async def _load_existing_telegram_ids(telegram_ids: list[int]) -> set[int]:
+    if not telegram_ids:
+        return set()
+    existing: set[int] = set()
+    async with AsyncSessionLocal() as session:
+        repo = ChannelRepository(session)
+        for i in range(0, len(telegram_ids), 400):
+            chunk = telegram_ids[i : i + 400]
+            existing |= await repo.existing_telegram_ids_among(chunk)
+    return existing
+
+
+def _unique_hit_collection_cap(target: int, merged: dict[str, Any], *, new_only: bool = False) -> int:
     """
     Сколько уникальных chat_id собрать из contacts.Search до остановки.
     При узком диапазоне подписчиков выдача Telegram редко попадает в бэнды — нужно больше сырых кандидатов.
@@ -58,6 +165,8 @@ def _unique_hit_collection_cap(target: int, merged: dict[str, Any]) -> int:
     min_sub = None
     max_sub = None
     base = max(80, target * 25)
+    if new_only:
+        base = max(base, target * 40, 300)
     if not _subscriber_filters_active(merged):
         return min(_MAX_UNIQUE_CANDIDATES, base)
     if isinstance(min_sub, int) and isinstance(max_sub, int):
@@ -158,10 +267,20 @@ async def run_telethon_stage(
     live_mode = str(job.payload.get("live_channel_mode") or "new").strip().lower()
     selected_channel_ids = [int(x) for x in (job.payload.get("selected_channel_ids") or []) if int(x) > 0]
     variants = _search_query_variants(query, user_topic, merged)
-    hit_cap = _unique_hit_collection_cap(target, merged)
     per_query_limit = min(_MAX_SEARCH_LIMIT, max(40, target * 8))
     if _subscriber_filters_active(merged):
         per_query_limit = _MAX_SEARCH_LIMIT
+
+    min_sub = merged.get("min_subscribers")
+    max_sub = merged.get("max_subscribers")
+    # «Новые» в UI telegram_live → live_channel_mode=new; исключение каналов из SQLite — new_only.
+    new_only = merged.get("channel_type") == "new_only" or live_mode == "new"
+    if username_query or live_mode == "saved":
+        # Для точечного username-поиска и актуализации выбранных сохранённых каналов
+        # не отбрасываем уже существующие каналы: требуется update-or-insert.
+        new_only = False
+
+    hit_cap = _unique_hit_collection_cap(target, merged, new_only=new_only)
 
     diagnostics: dict[str, Any] = {
         "primary_query": query,
@@ -169,6 +288,7 @@ async def run_telethon_stage(
         "target_count": target,
         "per_query_limit": per_query_limit,
         "unique_hit_cap": hit_cap,
+        "new_only_mode": new_only,
         "subscriber_filters_active": _subscriber_filters_active(merged),
         "queries_tried": [],
         "unique_candidates": 0,
@@ -184,16 +304,10 @@ async def run_telethon_stage(
         "sample_errors": [],
     }
 
-    min_sub = merged.get("min_subscribers")
-    max_sub = merged.get("max_subscribers")
-    new_only = merged.get("channel_type") == "new_only"
-    if username_query or live_mode == "saved":
-        # Для точечного username-поиска и актуализации выбранных сохранённых каналов
-        # не отбрасываем уже существующие каналы: требуется update-or-insert.
-        new_only = False
-
     seen_hit_ids: set[int] = set()
     ordered_hits: list[TelegramSearchHit] = []
+    enrich_hits: list[TelegramSearchHit] = []
+    existing_in_db: set[int] = set()
     if username_query:
         ident = username_query.lstrip("@")
         info = await telegram.get_channel_info(ident)
@@ -206,6 +320,7 @@ async def run_telethon_stage(
             )
         )
         diagnostics["queries_tried"].append({"q": f"@{ident}", "hits": 1, "mode": "username"})
+        enrich_hits = ordered_hits
     elif live_mode == "saved" and selected_channel_ids:
         async with AsyncSessionLocal() as session:
             repo = ChannelRepository(session)
@@ -221,23 +336,59 @@ async def run_telethon_stage(
             )
         target = min(20, max(1, len(ordered_hits)))
         diagnostics["queries_tried"].append({"q": "selected_saved_channels", "hits": len(ordered_hits), "mode": "saved"})
+        enrich_hits = ordered_hits
     else:
-        for qv in variants:
-            if len(ordered_hits) >= _MAX_UNIQUE_CANDIDATES:
-                break
-            hits = await telegram.search_public_channels(qv, limit=per_query_limit, broadcast_only=True)
-            diagnostics["queries_tried"].append({"q": qv, "hits": len(hits)})
-            diagnostics["raw_hits"] += len(hits)
-            for h in hits:
-                tid = int(h.telegram_channel_id)
-                if tid in seen_hit_ids:
-                    continue
-                seen_hit_ids.add(tid)
-                ordered_hits.append(h)
-            if len(ordered_hits) >= hit_cap:
-                break
+
+        async def _run_search_variants(variant_list: list[str], *, mode: str) -> None:
+            for qv in variant_list:
+                if len(ordered_hits) >= hit_cap:
+                    break
+                hits = await telegram.search_public_channels(qv, limit=per_query_limit, broadcast_only=True)
+                diagnostics["queries_tried"].append({"q": qv, "hits": len(hits), "mode": mode})
+                diagnostics["raw_hits"] += len(hits)
+                _append_unique_hits(
+                    hits,
+                    seen_hit_ids=seen_hit_ids,
+                    ordered_hits=ordered_hits,
+                    max_total=hit_cap,
+                )
+
+        await _run_search_variants(variants, mode="primary")
+
+        if new_only:
+            all_ids = [int(h.telegram_channel_id) for h in ordered_hits]
+            existing_in_db = await _load_existing_telegram_ids(all_ids)
+            min_pool = _min_new_candidate_pool(target)
+            diagnostics["new_candidates_after_primary"] = _count_fresh_candidates(ordered_hits, existing_in_db)
+
+            extras = _new_only_extra_variants(query, user_topic)
+            extra_idx = 0
+            extra_rounds = 0
+            while (
+                _count_fresh_candidates(ordered_hits, existing_in_db) < min_pool
+                and extra_idx < len(extras)
+                and len(ordered_hits) < hit_cap
+                and extra_rounds < _NEW_ONLY_MAX_EXTRA_ROUNDS
+            ):
+                batch = extras[extra_idx : extra_idx + _NEW_ONLY_VARIANT_BATCH]
+                extra_idx += len(batch)
+                extra_rounds += 1
+                if not batch:
+                    break
+                await _run_search_variants(batch, mode="new_only_extra")
+                all_ids = [int(h.telegram_channel_id) for h in ordered_hits]
+                existing_in_db = await _load_existing_telegram_ids(all_ids)
+
+            diagnostics["new_only_extra_rounds"] = extra_rounds
+            diagnostics["new_candidates_pool"] = _count_fresh_candidates(ordered_hits, existing_in_db)
+            enrich_hits = [
+                h for h in ordered_hits if int(h.telegram_channel_id) not in existing_in_db
+            ]
+        else:
+            enrich_hits = ordered_hits
 
     diagnostics["unique_candidates"] = len(ordered_hits)
+    diagnostics["enrich_candidates"] = len(enrich_hits)
     logger.info(
         "discovery.telethon job_id=%s target=%s unique_candidates=%d variants=%d",
         job.id,
@@ -245,15 +396,6 @@ async def run_telethon_stage(
         len(ordered_hits),
         len(diagnostics["queries_tried"]),
     )
-
-    existing_in_db: set[int] = set()
-    if new_only and ordered_hits:
-        all_ids = [int(h.telegram_channel_id) for h in ordered_hits]
-        async with AsyncSessionLocal() as session:
-            repo = ChannelRepository(session)
-            for i in range(0, len(all_ids), 400):
-                chunk = all_ids[i : i + 400]
-                existing_in_db |= await repo.existing_telegram_ids_among(chunk)
 
     sem = asyncio.Semaphore(_ENRICH_CONCURRENCY)
 
@@ -298,10 +440,10 @@ async def run_telethon_stage(
             }
 
     normalized: list[dict[str, Any]] = []
-    for i in range(0, len(ordered_hits), _ENRICH_BATCH):
+    for i in range(0, len(enrich_hits), _ENRICH_BATCH):
         if len(normalized) >= target:
             break
-        batch = ordered_hits[i : i + _ENRICH_BATCH]
+        batch = enrich_hits[i : i + _ENRICH_BATCH]
         rows = await asyncio.gather(*[enrich(h) for h in batch])
         for row in rows:
             if row is None:

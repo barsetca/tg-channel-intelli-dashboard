@@ -202,11 +202,17 @@ class OrchestrationCoordinator:
                     " contacts.Search не сужает по подписчикам и не индексирует описание как TGStat;"
                     " при узком диапазоне большинство кандидатов отсекается после get_channel_info."
                 )
+            new_only_hint = ""
+            if top_reasons and any("new_only_existing" in str(x) for x in top_reasons):
+                new_only_hint = (
+                    " В режиме «Новые» каналы из каталога пропускаются;"
+                    " если результатов меньше запрошенного — уточните тему или сузьте нишу."
+                )
             job.detail = (
                 f"Поиск в Telegram завершён: сохранено {saved} из запрошенных до {wanted}. "
                 f"Уникальных кандидатов из поиска: {unique_candidates}, отсеяно: {skipped_total}. "
                 f"Топ причин: {reason_text}. Попробуйте ослабить фильтры или расширить формулировку темы."
-                f"{subs_hint}"
+                f"{subs_hint}{new_only_hint}"
             )
         else:
             job.detail = (

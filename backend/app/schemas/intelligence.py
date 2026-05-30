@@ -310,6 +310,23 @@ class ChannelAnalysisReport(BaseModel):
     channel_description: str
     topic: str
     subscribers_count: int | None = None
+    channel_url: str | None = Field(None, description="Публичная ссылка t.me на канал")
+    channel_created_display: str | None = Field(
+        None,
+        description="Дата создания канала в Telegram, DD.MM.YYYY",
+    )
+    channel_age_display: str | None = Field(
+        None,
+        description="Возраст канала от даты создания до сегодня",
+    )
+    posts_last_30_days: int | None = Field(
+        None,
+        description="Постов за последние 30 дней (по тексту канала; короткие посты учитываются, служебный мусор отфильтрован)",
+    )
+    total_posts_filtered: int | None = Field(
+        None,
+        description="Всего постов с непустым текстом в объединённой выборке (Telegram recent+history и БД), без порога 30 симв.",
+    )
     report_created_at: datetime | None = None
     publication_frequency: str
     avg_post_length: int | None

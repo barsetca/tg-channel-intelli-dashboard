@@ -139,6 +139,11 @@ export type ChannelAnalysisReport = {
   channel_description: string;
   topic: string;
   subscribers_count?: number | null;
+  channel_url?: string | null;
+  channel_created_display?: string | null;
+  channel_age_display?: string | null;
+  posts_last_30_days?: number | null;
+  total_posts_filtered?: number | null;
   report_created_at?: string | null;
   publication_frequency: string;
   avg_post_length: number | null;
@@ -378,3 +383,57 @@ export type TelegramAuthStartResponse = {
 export type TelegramAuthCodeResponse =
   | { status: "authorized"; telegram_session: string; hint: string }
   | { status: "needs_password"; flow_id: string };
+
+export type PublishingOutputMode = "post_with_image" | "infographic_only";
+
+export type PublishableChannel = {
+  telegram_channel_id: number;
+  username: string | null;
+  title: string | null;
+};
+
+export type GeneratePostRequest = {
+  topic: string;
+  char_count: number;
+  extra_info?: string | null;
+  output_mode: PublishingOutputMode;
+};
+
+export type GeneratedPostResponse = {
+  topic: string;
+  target_char_count: number;
+  actual_char_count: number;
+  output_mode: string;
+  post_text: string | null;
+  image_prompt_used: string;
+  image_model: string;
+  image_base64: string;
+};
+
+export type PublishGeneratedRequest = GeneratePostRequest & {
+  channel_ref: string;
+};
+
+export type PublishResultResponse = {
+  telegram_message_id: number;
+  peer_ref: string;
+  published_at_utc: string;
+  had_image: boolean;
+  had_text: boolean;
+};
+
+export type PublishGeneratedResponse = {
+  generated: GeneratedPostResponse;
+  published: PublishResultResponse;
+};
+
+export type PublishManualRequest = {
+  channel_ref: string;
+  text?: string | null;
+  image_base64?: string | null;
+};
+
+export type SendChatMessageRequest = {
+  chat_ref: string;
+  text: string;
+};

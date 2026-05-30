@@ -121,8 +121,17 @@ async def search_channels(q: str, telegram: TelethonUserSessionServiceDep):
 | `resolve_channel(identifier)` | Строка (`@username`, `t.me/...`) или числовой peer → **`Channel`** |
 | `get_channel_info(identifier)` | **`TelegramChannelFullInfo`** (about, participants_count при наличии) |
 | `fetch_recent_posts(identifier, limit=25, max_additional_fetch_rounds_for_flood=0)` | Список **`TelegramPostBrief`**, порядок **хронологический** (старые первыми); служебные сообщения с **`action`** отфильтрованы |
+| `list_publishable_channels()` | Каналы для модуля **«Публикация»**: broadcast, где сессия — создатель/админ с **`post_messages`** |
+| `publish_to_channel(identifier, text=, image_bytes=)` | Публикация в канал: фото с подписью / только фото / только текст |
+| `send_user_message(identifier, text=)` | Личное сообщение или сообщение в чат от user session |
 
 DTO описаны в [`dto.py`](../app/integrations/telethon/dto.py).
+
+### Публикация и медиа
+
+Модуль **`app/publishing/`** использует **`publish_to_channel`** и **`send_user_message`**. Бинарные изображения передаются через [`media_bytes.py`](../app/integrations/telethon/media_bytes.py): `BytesIO` с атрибутом **`.name`** (например `image.jpg`) и корректным **MIME**, чтобы Telethon отправил **`send_file(..., force_document=False)`** как **фото в ленте**, а не как документ «скачать файл».
+
+Документация модуля: [PUBLISHING.md](PUBLISHING.md).
 
 ## Ошибки и лимиты (FloodWait)
 
@@ -144,10 +153,11 @@ app/integrations/telethon/
 ├── __init__.py              # экспорт публичного API и DTO/исключений
 ├── dto.py                   # TelegramSearchHit, TelegramChannelFullInfo, TelegramPostBrief
 ├── exceptions.py            # иерархия ошибок, map_telethon_error / coerce_to_telegram_error
+├── media_bytes.py           # BytesIO + MIME для отправки изображений как photo (модуль «Публикация»)
 ├── rate_limit.py            # run_with_optional_flood_retry (FloodWait с капом)
 ├── session_source.py        # effective_string_session, sidecar *.session.string, удаление *.session
 ├── interactive_auth.py      # TelegramInteractiveAuthFlows, реконнект после входа по HTTP
-└── user_session_service.py  # TelethonUserSessionService
+└── user_session_service.py  # TelethonUserSessionService (в т.ч. publish_to_channel, send_user_message)
 ```
 
 Отдельно в [`app/integrations/telethon_client.py`](../app/integrations/telethon_client.py) остаётся заготовка **`TelethonFactory`** (синхронная фабрика клиента без user-session-слоя); **боевое приложение** использует **`TelethonUserSessionService`** из пакета выше.

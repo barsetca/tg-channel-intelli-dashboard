@@ -10,6 +10,7 @@ import {
   Home,
   Layers,
   LineChart,
+  Megaphone,
   Search,
   Sparkles,
 } from "lucide-react";
@@ -19,6 +20,7 @@ const nav = [
   { href: "/search", label: "Поиск каналов", icon: Search },
   { href: "/datasets", label: "Наборы данных", icon: Database },
   { href: "/channel-analysis", label: "Анализ канала", icon: LineChart },
+  { href: "/publishing", label: "Публикация", icon: Megaphone },
   { href: "/semantic-search", label: "Семантический поиск", icon: Layers },
   { href: "/compare", label: "Сравнение", icon: BarChart3 },
   { href: "/showcase", label: "Витрина данных", icon: FileJson },

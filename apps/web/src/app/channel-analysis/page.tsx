@@ -19,6 +19,7 @@ import type {
   SummarizePostsResponse,
 } from "@/lib/types/api";
 import { AnalysisReportView } from "@/components/channel-analysis-report-view";
+import { ChannelAnalysisPdfButton } from "@/components/channel-analysis-pdf-button";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
@@ -62,6 +63,7 @@ export default function ChannelAnalysisPage() {
   const [loading, setLoading] = useState(false);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorTitle, setErrorTitle] = useState("Ошибка");
   const [result, setResult] = useState<AnalyzeChannelResponse | null>(null);
   const [summaryResult, setSummaryResult] = useState<SummarizePostsResponse | null>(null);
   const [showPick, setShowPick] = useState(false);
@@ -183,6 +185,7 @@ export default function ChannelAnalysisPage() {
     e.preventDefault();
     setLoading(true);
     setError(null);
+    setErrorTitle("Ошибка анализа");
     setResult(null);
     setSummaryResult(null);
     try {
@@ -196,15 +199,22 @@ export default function ChannelAnalysisPage() {
         setResolvedChannelId(res.channel_id);
       }
     } catch (err) {
-      setError(err instanceof ApiError ? `${err.status}: ${err.message}` : "Request failed");
+      setError(formatRequestError(err));
     } finally {
       setLoading(false);
     }
   }
 
+  function formatRequestError(err: unknown): string {
+    if (err instanceof ApiError) return `${err.status}: ${err.message}`;
+    if (err instanceof Error && err.message) return err.message;
+    return "Не удалось выполнить запрос к API";
+  }
+
   async function onSummarizePosts() {
     setSummaryLoading(true);
     setError(null);
+    setErrorTitle("Ошибка резюме постов");
     setResult(null);
     setSummaryResult(null);
     try {
@@ -217,7 +227,7 @@ export default function ChannelAnalysisPage() {
         setResolvedChannelId(res.channel_id);
       }
     } catch (err) {
-      setError(err instanceof ApiError ? `${err.status}: ${err.message}` : "Request failed");
+      setError(formatRequestError(err));
     } finally {
       setSummaryLoading(false);
     }
@@ -447,7 +457,7 @@ export default function ChannelAnalysisPage() {
       ) : null}
 
       {error ? (
-        <Alert variant="error" title="Ошибка анализа">
+        <Alert variant="error" title={errorTitle}>
           {error}
         </Alert>
       ) : null}
@@ -510,12 +520,20 @@ export default function ChannelAnalysisPage() {
                     <span className="text-zinc-600">{row.status}</span>
                     <span className="mt-0.5 block text-xs text-zinc-500">{formatHistoryDate(row.created_at)}</span>
                   </button>
+                  <ChannelAnalysisPdfButton
+                    analysisId={row.id}
+                    stopPropagation
+                    className="shrink-0 rounded-none p-2.5"
+                  />
                   <Button
                     type="button"
                     variant="ghost"
                     className="shrink-0 rounded-none rounded-r-xl p-2.5"
                     aria-label="Удалить отчёт"
-                    onClick={() => void deleteReportById(row.id, "history")}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void deleteReportById(row.id, "history");
+                    }}
                   >
                     <Trash2 className="size-4 text-zinc-500" />
                   </Button>
@@ -538,15 +556,18 @@ export default function ChannelAnalysisPage() {
                 : "Результат анализа канала"}
             </CardTitle>
             {result.analysis_id > 0 ? (
-              <Button
-                type="button"
-                variant="ghost"
-                className="shrink-0 p-2"
-                aria-label="Удалить отчёт"
-                onClick={() => void deleteReportById(result.analysis_id, "card")}
-              >
-                <Trash2 className="size-4 text-zinc-500" />
-              </Button>
+              <div className="flex shrink-0 items-center gap-0.5">
+                <ChannelAnalysisPdfButton analysisId={result.analysis_id} />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  className="p-2"
+                  aria-label="Удалить отчёт"
+                  onClick={() => void deleteReportById(result.analysis_id, "card")}
+                >
+                  <Trash2 className="size-4 text-zinc-500" />
+                </Button>
+              </div>
             ) : null}
           </div>
           <div className={`mt-4 rounded-xl border p-3 text-sm whitespace-pre-line ${statusTone}`}>

@@ -50,6 +50,25 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_embedding_model: str = "text-embedding-3-small"
     openai_chat_model: str = "gpt-4o-mini"
+    openai_image_model: str = Field(
+        default="dall-e-3",
+        validation_alias=AliasChoices("OPENAI_IMAGE_MODEL", "openai_image_model"),
+    )
+    # DALL·E 3: 1024x1024 | 1792x1024 | 1024x1792. gpt-image-1: 1024x1024 | 1536x1024 | 1024x1536 | auto
+    openai_image_size: str = Field(
+        default="1024x1024",
+        validation_alias=AliasChoices("OPENAI_IMAGE_SIZE", "openai_image_size"),
+    )
+    # DALL·E 3: standard | hd. gpt-image-1: low | medium | high | auto
+    openai_image_quality: str = Field(
+        default="standard",
+        validation_alias=AliasChoices("OPENAI_IMAGE_QUALITY", "openai_image_quality"),
+    )
+    publishing_style_path: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("PUBLISHING_STYLE_PATH", "publishing_style_path"),
+        description="Путь к файлу образцов стиля автора; иначе context/post_style.txt или bundled",
+    )
 
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str | None = None

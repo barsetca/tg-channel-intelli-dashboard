@@ -30,6 +30,14 @@ import type {
   TelegramAuthStartResponse,
   TelegramIntegrationStatus,
   OrchestrationJobStatus,
+  PublishableChannel,
+  GeneratePostRequest,
+  GeneratedPostResponse,
+  PublishGeneratedRequest,
+  PublishGeneratedResponse,
+  PublishManualRequest,
+  PublishResultResponse,
+  SendChatMessageRequest,
 } from "@/lib/types/api";
 
 export function getApiBaseUrl(): string {
@@ -198,6 +206,30 @@ export async function deleteChannelAnalysis(analysisId: number): Promise<void> {
   });
 }
 
+/** PDF отчёта: генерируется на лету, без кеша на сервере. */
+export function channelAnalysisPdfUrl(analysisId: number): string {
+  return `${getPublicApiBaseUrl()}/api/v1/analyses/${encodeURIComponent(String(analysisId))}/pdf`;
+}
+
+/** Загрузка PDF после готовности (для кнопки с индикатором ожидания в UI). */
+export async function fetchChannelAnalysisPdf(analysisId: number): Promise<Blob> {
+  const res = await fetch(`${getApiBaseUrl()}/api/v1/analyses/${encodeURIComponent(String(analysisId))}/pdf`, {
+    cache: "no-store",
+    mode: "cors",
+  });
+  if (!res.ok) {
+    let msg = await res.text();
+    try {
+      const j = JSON.parse(msg) as { detail?: string | unknown };
+      if (typeof j.detail === "string") msg = j.detail;
+    } catch {
+      /* текст как есть */
+    }
+    throw new ApiError(res.status, msg || res.statusText);
+  }
+  return res.blob();
+}
+
 export async function summarizeChannel(
   channelId: number,
   body: SummarizePostsRequest,
@@ -273,4 +305,36 @@ export async function deleteChannel(channelId: number): Promise<void> {
 export function exportChannelsUrl(format: "json" | "csv"): string {
   const q = new URLSearchParams({ format, limit: "500" });
   return `${getPublicApiBaseUrl()}/api/v1/export?${q}`;
+}
+
+export async function listPublishableChannels(): Promise<PublishableChannel[]> {
+  return jsonFetch<PublishableChannel[]>("/api/v1/publishing/channels");
+}
+
+export async function generatePublishingPost(body: GeneratePostRequest): Promise<GeneratedPostResponse> {
+  return jsonFetch<GeneratedPostResponse>("/api/v1/publishing/generate", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function publishGeneratedPost(body: PublishGeneratedRequest): Promise<PublishGeneratedResponse> {
+  return jsonFetch<PublishGeneratedResponse>("/api/v1/publishing/publish-generated", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function publishManualPost(body: PublishManualRequest): Promise<PublishResultResponse> {
+  return jsonFetch<PublishResultResponse>("/api/v1/publishing/publish-manual", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function sendTelegramChatMessage(body: SendChatMessageRequest): Promise<PublishResultResponse> {
+  return jsonFetch<PublishResultResponse>("/api/v1/publishing/send-message", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
@@ -15,6 +16,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
+from time import perf_counter
 from decimal import Decimal
 from statistics import mean, median
 from typing import Any
@@ -88,10 +90,24 @@ from app.schemas.intelligence import (
     SemanticSearchResponse,
     SemanticSource,
 )
+from app.services.channel_report_metrics import (
+    channel_public_url,
+    compute_publication_frequency_per_week,
+    count_relevant_posts,
+    count_relevant_posts_last_days,
+    format_channel_age,
+    format_date_ru,
+    format_publication_frequency,
+    is_relevant_post_text,
+    resolve_channel_created_at,
+)
 from app.services.channel_search_planner import merge_planner_with_user_request, plan_channel_search
 from app.services.vector_service import VectorService
 
 logger = logging.getLogger(__name__)
+
+# Глубина Telethon-истории для метрик отчёта (не привязана к post_limit для LLM).
+_REPORT_METRICS_HISTORY_LIMIT = 5000
 
 
 def _log_preview(text: str | None, *, max_len: int = 120) -> str:
@@ -293,6 +309,25 @@ def _sync_at_sort_key(dt: datetime | None) -> datetime:
     if dt is None:
         return datetime(1970, 1, 1, tzinfo=timezone.utc)
     return ensure_utc_aware(dt)
+
+
+def _saved_catalog_page_limits(count: int | None) -> tuple[int | None, int | None]:
+    """
+    Лимиты выдачи saved_catalog.
+
+    count=None — режим «Показать все»: без SQL LIMIT и без обрезки ответа.
+    Иначе catalog_limit=count+1 (для has_more), page_cap=count.
+    """
+    if count is None:
+        return None, None
+    n = max(1, int(count))
+    return n + 1, n
+
+
+@dataclass(frozen=True)
+class _MetricPostRow:
+    posted_at: datetime
+    text: str | None
 
 
 def channel_display_ref(ch: Channel) -> str:
@@ -829,8 +864,15 @@ class IntelligenceService:
             )
 
         if all_topics_mode:
-            page_size = int(body.count or 20)
-            catalog_limit: int | None = None if body.count is None else (page_size + 1)
+            catalog_limit, page_cap = _saved_catalog_page_limits(body.count)
+            logger.info(
+                "search_channels saved_catalog all_topics topic=%r count=%s offset=%s show_all=%s catalog_limit=%s",
+                body.topic,
+                body.count,
+                body.offset,
+                body.count is None,
+                catalog_limit,
+            )
             rows = await self._channels.search_catalog(
                 topic="__all__",
                 limit=catalog_limit,
@@ -847,9 +889,9 @@ class IntelligenceService:
                 last_post_at_lte=last_post_at_lte,
             )
             has_more = False
-            if page_size > 0 and len(rows) > page_size:
+            if page_cap is not None and len(rows) > page_cap:
                 has_more = True
-                rows = rows[:page_size]
+                rows = rows[:page_cap]
             cards = [ChannelCard.model_validate(r) for r in rows]
             normalized = {
                 **body.model_dump(mode="json"),
@@ -857,9 +899,10 @@ class IntelligenceService:
                 "saved_catalog_topics_tried": ["__all__"],
             }
             logger.info(
-                "search_channels saved_catalog all_topics channels_returned=%s has_more=%s",
+                "search_channels saved_catalog all_topics channels_returned=%s has_more=%s page_cap=%s",
                 len(cards),
                 has_more,
+                page_cap,
             )
             return SearchChannelsResponse(
                 channels=cards,
@@ -873,10 +916,20 @@ class IntelligenceService:
         merged = merge_planner_with_user_request(body.model_dump(mode="json"), planner)
         planner_topic = str(merged.get("search_topic") or body.topic).strip()
         user_topic = body.topic.strip()
-        # Для серверной пагинации размер страницы должен задаваться клиентом,
-        # иначе planner может "сжимать" count (например до 17) и ломать infinite scroll.
-        page_size = int(body.count or merged.get("count") or 20)
-        catalog_limit: int | None = None if body.count is None else (page_size + 1)
+        catalog_limit, page_cap = _saved_catalog_page_limits(body.count)
+        logger.info(
+            "search_channels saved_catalog topic=%r planner_topic=%r count=%s offset=%s show_all=%s "
+            "catalog_limit=%s channel_type=%s sort=%s/%s",
+            user_topic,
+            planner_topic,
+            body.count,
+            body.offset,
+            body.count is None,
+            catalog_limit,
+            body.channel_type,
+            body.sort_by,
+            body.sort_order,
+        )
         eff_sort_by = "last_sync_at" if merged.get("channel_type") == "new_only" else body.sort_by
         eff_sort_order = "desc" if merged.get("channel_type") == "new_only" else body.sort_order
         catalog_kw: dict[str, Any] = {
@@ -926,9 +979,9 @@ class IntelligenceService:
                 )
             rows = merged_rows if catalog_limit is None else merged_rows[:catalog_limit]
         has_more = False
-        if page_size > 0 and len(rows) > page_size:
+        if page_cap is not None and len(rows) > page_cap:
             has_more = True
-            rows = rows[:page_size]
+            rows = rows[:page_cap]
         cards = [ChannelCard.model_validate(r) for r in rows]
         try:
             await self._record_catalog_search_audit(body, planner, rows)
@@ -946,9 +999,11 @@ class IntelligenceService:
             },
         }
         logger.info(
-            "search_channels saved_catalog done channels_returned=%s has_more=%s planner_topic=%r user_topic=%r confidence=%s",
+            "search_channels saved_catalog done channels_returned=%s has_more=%s page_cap=%s "
+            "planner_topic=%r user_topic=%r confidence=%s",
             len(cards),
             has_more,
+            page_cap,
             _log_preview(planner_topic),
             _log_preview(user_topic),
             planner.confidence,
@@ -1205,6 +1260,7 @@ class IntelligenceService:
         self,
         *,
         analysis_id: int,
+        lightweight: bool = False,
     ) -> tuple[SavedChannelAnalysisDetail | None, str | None]:
         res = await self._session.execute(select(Analysis).where(Analysis.id == analysis_id))
         analysis = res.scalar_one_or_none()
@@ -1213,18 +1269,63 @@ class IntelligenceService:
         ch = await self._channels.get_by_id(int(analysis.channel_id))
         if ch is None:
             return None, "channel_not_found"
-        res_posts = await self._session.execute(
-            select(Post)
-            .where(Post.channel_id == ch.id)
-            .order_by(Post.posted_at.desc())
-            .limit(50),
-        )
-        posts = list(res_posts.scalars())
+        result_json = analysis.result_json if isinstance(analysis.result_json, dict) else None
+        posts: list[Post] = []
+        if not lightweight:
+            res_posts = await self._session.execute(
+                select(Post)
+                .where(Post.channel_id == ch.id)
+                .order_by(Post.posted_at.desc())
+                .limit(50),
+            )
+            posts = list(res_posts.scalars())
+
+        metrics_snapshot: dict[str, Any] | None = None
+        if isinstance(result_json, dict):
+            raw_snap = result_json.get("channel_report_metrics")
+            if isinstance(raw_snap, dict):
+                metrics_snapshot = raw_snap
+
+        if metrics_snapshot is None:
+            # PDF и GET /analyses/{id} — lightweight: не ходим в Telegram (до 5000 GetHistory + flood wait).
+            telegram_entity_date = await self._fetch_telegram_channel_entity_date(ch)
+            metric_posts = await self._load_posts_for_report_metrics(
+                ch,
+                use_telethon=not lightweight,
+                history_limit=_REPORT_METRICS_HISTORY_LIMIT,
+            )
+            start_at = self._resolve_channel_created_at(
+                channel=ch,
+                metric_posts=metric_posts,
+                telegram_channel_date=telegram_entity_date,
+            )
+            if start_at is not None:
+                ch.telegram_created_at = start_at
+            metrics_snapshot = self._build_channel_report_metrics_snapshot(
+                channel=ch,
+                metric_posts=metric_posts,
+                channel_start_at=start_at,
+            )
+            logger.info(
+                "get_saved_channel_analysis metrics_recomputed analysis_id=%s channel_id=%s "
+                "lightweight=%s telethon=%s",
+                analysis_id,
+                ch.id,
+                lightweight,
+                not lightweight,
+            )
+        elif lightweight:
+            logger.info(
+                "get_saved_channel_analysis metrics_from_cache analysis_id=%s channel_id=%s",
+                analysis_id,
+                ch.id,
+            )
         report = self._build_channel_analysis_report(
             channel=ch,
             posts=posts,
-            result_json=analysis.result_json if isinstance(analysis.result_json, dict) else None,
+            result_json=result_json,
             report_created_at=analysis.created_at,
+            metrics_snapshot=metrics_snapshot,
         )
         label = channel_display_ref(ch)
         msg = analysis_status_message(
@@ -1272,6 +1373,8 @@ class IntelligenceService:
         if ch is None:
             return None, "not_found"
 
+        await self._refresh_channel_telegram_meta(ch)
+
         label = channel_display_ref(ch)
 
         target_posts = max(3, int(post_limit))
@@ -1283,18 +1386,23 @@ class IntelligenceService:
             .limit(sample_limit),
         )
         posts = list(res_posts.scalars())
+        min_posts_for_catalog = min(50, sample_limit)
+        needs_telethon_ingest = len(posts) < min_posts_for_catalog
         logger.info(
             "run_channel_analysis ingest channel_id=%s label=%s post_limit=%s db_post_rows=%s telethon_backfill=%s",
             channel_id,
             label,
             post_limit,
             len(posts),
-            len(posts) == 0 and self._telegram is not None,
+            needs_telethon_ingest and self._telegram is not None,
         )
-        if len(posts) == 0 and self._telegram is not None:
+        if needs_telethon_ingest and self._telegram is not None:
             channel_ref = (ch.username or ch.invite_slug or str(ch.telegram_id or "")).strip()
             try:
-                recent_posts = await self._telegram.fetch_recent_posts(channel_ref, limit=max(40, target_posts * 5))
+                recent_posts = await self._telegram.fetch_recent_posts(
+                    channel_ref,
+                    limit=max(100, target_posts * 8),
+                )
             except TelegramTelethonError:
                 recent_posts = []
             if recent_posts:
@@ -1327,12 +1435,7 @@ class IntelligenceService:
                         existing.forwards_count = p.forwards
                         existing.raw_payload_json = raw
                 norm_dates = [ensure_utc_aware(p.date_utc) for p in sorted_posts]
-                last_dt = max(norm_dates)
-                first_dt = min(norm_dates)
-                ch.last_post_at = last_dt
-                span_days = max((last_dt - first_dt).total_seconds() / 86400.0, 0.25)
-                weeks = max(span_days / 7.0, 0.05)
-                ch.posts_per_week_estimate = round(len(sorted_posts) / weeks, 3)
+                ch.last_post_at = max(norm_dates)
                 await self._session.commit()
                 res_posts = await self._session.execute(
                     select(Post)
@@ -1342,6 +1445,24 @@ class IntelligenceService:
                 )
                 posts = list(res_posts.scalars())
         filtered_posts, snippets = self._prepare_db_posts_for_analysis(posts, target_count=target_posts)
+        telegram_entity_date = await self._fetch_telegram_channel_entity_date(ch)
+        metric_posts = await self._load_posts_for_report_metrics(
+            ch,
+            history_limit=_REPORT_METRICS_HISTORY_LIMIT,
+        )
+        start_at = self._resolve_channel_created_at(
+            channel=ch,
+            metric_posts=metric_posts,
+            telegram_channel_date=telegram_entity_date,
+        )
+        if start_at is not None:
+            ch.telegram_created_at = start_at
+        self._apply_posts_per_week_estimate(ch, metric_posts, channel_start_at=start_at)
+        report_metrics_snapshot = self._build_channel_report_metrics_snapshot(
+            channel=ch,
+            metric_posts=metric_posts,
+            channel_start_at=start_at,
+        )
 
         inp = ChannelPipelineInput(
             user_intent=user_intent,
@@ -1371,11 +1492,18 @@ class IntelligenceService:
             pipeline = ChannelAnalysisPipeline()
             result = await pipeline.run(inp)
             analysis.status = "completed"
-            analysis.result_json = result.to_result_dict()
+            result_payload = result.to_result_dict()
+            if isinstance(result_payload, dict):
+                result_payload["channel_report_metrics"] = report_metrics_snapshot
+            analysis.result_json = result_payload
             analysis.llm_model = self._settings.openai_chat_model
         except PipelineValidationBlockedError as e:
             analysis.status = "blocked_validation"
-            analysis.result_json = {"reasons": e.reasons, "validation": "block"}
+            analysis.result_json = {
+                "reasons": e.reasons,
+                "validation": "block",
+                "channel_report_metrics": report_metrics_snapshot,
+            }
             analysis.error_detail = "; ".join(e.reasons)
             logger.warning(
                 "run_channel_analysis validation_blocked analysis_id=%s reasons=%s",
@@ -1417,6 +1545,7 @@ class IntelligenceService:
             posts=filtered_posts,
             result_json=analysis.result_json if isinstance(analysis.result_json, dict) else None,
             report_created_at=analysis.created_at,
+            metrics_snapshot=report_metrics_snapshot,
         )
         return (
             AnalyzeChannelResponse(
@@ -1447,6 +1576,7 @@ class IntelligenceService:
         posts: list[Post],
         result_json: dict[str, Any] | None,
         report_created_at: datetime | None = None,
+        metrics_snapshot: dict[str, Any] | None = None,
     ) -> ChannelAnalysisReport:
         post_count = len(posts)
         avg_len = None
@@ -1454,11 +1584,39 @@ class IntelligenceService:
             lengths = [len((p.text or "").strip()) for p in posts if (p.text or "").strip()]
             if lengths:
                 avg_len = int(round(sum(lengths) / len(lengths)))
-        freq = (
-            f"{channel.posts_per_week_estimate:.2f} поста/нед"
-            if channel.posts_per_week_estimate is not None
-            else "Недостаточно данных"
+
+        snap = metrics_snapshot
+        if snap is None and isinstance(result_json, dict):
+            raw_snap = result_json.get("channel_report_metrics")
+            if isinstance(raw_snap, dict):
+                snap = raw_snap
+
+        freq = "Недостаточно данных"
+        channel_url: str | None = channel_public_url(
+            username=channel.username,
+            invite_slug=channel.invite_slug,
         )
+        channel_created_display: str | None = format_date_ru(channel.telegram_created_at)
+        channel_age_display: str | None = format_channel_age(channel.telegram_created_at)
+        posts_last_30_days: int | None = None
+        total_posts_filtered: int | None = None
+
+        if isinstance(snap, dict):
+            freq = str(snap.get("publication_frequency") or freq)
+            channel_url = snap.get("channel_url") or channel_url
+            channel_created_display = snap.get("channel_created_display") or channel_created_display
+            channel_age_display = snap.get("channel_age_display") or channel_age_display
+            if snap.get("posts_last_30_days") is not None:
+                posts_last_30_days = int(snap["posts_last_30_days"])
+            if snap.get("total_posts_filtered") is not None:
+                total_posts_filtered = int(snap["total_posts_filtered"])
+            if avg_len is None and snap.get("avg_post_length") is not None:
+                try:
+                    avg_len = int(snap["avg_post_length"])
+                except (TypeError, ValueError):
+                    pass
+        elif channel.posts_per_week_estimate is not None:
+            freq = f"{channel.posts_per_week_estimate:.2f} поста/нед"
         audit = (result_json or {}).get("audit") if isinstance(result_json, dict) else None
         recs_blob = (
             (result_json or {}).get("recommendations", {}).get("items", [])
@@ -1527,6 +1685,11 @@ class IntelligenceService:
             channel_description=(channel.description or "Описание отсутствует").strip(),
             topic=(channel.primary_topic or "Не определена").strip(),
             subscribers_count=channel.subscriber_count,
+            channel_url=channel_url,
+            channel_created_display=channel_created_display,
+            channel_age_display=channel_age_display,
+            posts_last_30_days=posts_last_30_days,
+            total_posts_filtered=total_posts_filtered,
             report_created_at=report_created_at,
             publication_frequency=freq,
             avg_post_length=avg_len,
@@ -1618,12 +1781,7 @@ class IntelligenceService:
                     existing.forwards_count = p.forwards
                     existing.raw_payload_json = raw
             norm_dates = [ensure_utc_aware(p.date_utc) for p in sorted_posts]
-            last_dt = max(norm_dates)
-            first_dt = min(norm_dates)
-            ch.last_post_at = last_dt
-            span_days = max((last_dt - first_dt).total_seconds() / 86400.0, 0.25)
-            weeks = max(span_days / 7.0, 0.05)
-            ch.posts_per_week_estimate = round(len(sorted_posts) / weeks, 3)
+            ch.last_post_at = max(norm_dates)
         ch.is_public_accessible = True
         await self._session.commit()
         result, err = await self.run_channel_analysis(
@@ -1642,12 +1800,198 @@ class IntelligenceService:
         return result
 
     def _is_relevant_post_text(self, text: str) -> bool:
-        t = " ".join(text.split())
-        if len(t) < 30:
-            return False
-        lower = t.lower()
-        garbage = ("joined the channel", "left the channel", "бот", "реклама", "подписывайтесь")
-        return not any(x in lower for x in garbage)
+        return is_relevant_post_text(text)
+
+    def _to_metric_posts(self, posts: Sequence[Post | TelegramPostBrief]) -> list[_MetricPostRow]:
+        rows: list[_MetricPostRow] = []
+        for p in posts:
+            if isinstance(p, Post):
+                rows.append(_MetricPostRow(ensure_utc_aware(p.posted_at), p.text))
+            else:
+                rows.append(_MetricPostRow(ensure_utc_aware(p.date_utc), p.text))
+        return rows
+
+    async def _refresh_channel_telegram_meta(self, ch: Channel) -> None:
+        if self._telegram is None:
+            return
+        channel_ref = (ch.username or ch.invite_slug or str(ch.telegram_id or "")).strip()
+        if not channel_ref:
+            return
+        try:
+            info = await self._telegram.get_channel_info(channel_ref)
+            if info.participants_count is not None:
+                ch.subscriber_count = info.participants_count
+            if info.title:
+                ch.title = info.title
+            if info.about is not None:
+                ch.description = info.about
+        except Exception:  # noqa: BLE001
+            logger.warning("channel_meta refresh failed channel_id=%s", ch.id, exc_info=True)
+
+    async def _fetch_telegram_channel_entity_date(self, ch: Channel) -> datetime | None:
+        if self._telegram is None:
+            return None
+        channel_ref = (ch.username or ch.invite_slug or str(ch.telegram_id or "")).strip()
+        if not channel_ref:
+            return None
+        try:
+            info = await self._telegram.get_channel_info(channel_ref)
+            return info.created_at_utc
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "telegram entity date fetch failed channel_id=%s ref=%r",
+                ch.id,
+                channel_ref,
+                exc_info=True,
+            )
+            return None
+
+    def _resolve_channel_created_at(
+        self,
+        *,
+        channel: Channel,
+        metric_posts: list[_MetricPostRow],
+        telegram_channel_date: datetime | None = None,
+    ) -> datetime | None:
+        resolved = resolve_channel_created_at(
+            telegram_channel_date=telegram_channel_date,
+            posts=metric_posts,
+        )
+        if resolved is not None:
+            return resolved
+        return channel.telegram_created_at
+
+    def _absorb_metric_briefs(
+        self,
+        by_id: dict[int, _MetricPostRow],
+        briefs: Sequence[TelegramPostBrief],
+    ) -> None:
+        for p in briefs:
+            mid = int(p.telegram_message_id)
+            by_id[mid] = _MetricPostRow(ensure_utc_aware(p.date_utc), p.text)
+
+    def _absorb_db_posts_for_metrics(
+        self,
+        by_id: dict[int, _MetricPostRow],
+        posts: Sequence[Post],
+    ) -> None:
+        for p in posts:
+            mid = getattr(p, "telegram_message_id", None)
+            if mid is None:
+                continue
+            key = int(mid)
+            if key not in by_id:
+                by_id[key] = _MetricPostRow(ensure_utc_aware(p.posted_at), p.text)
+
+    async def _load_posts_for_report_metrics(
+        self,
+        ch: Channel,
+        *,
+        use_telethon: bool = True,
+        history_limit: int = 5000,
+    ) -> list[_MetricPostRow]:
+        """
+        Посты для счётчиков отчёта: объединение recent + history (как «Резюмировать») и БД.
+
+        Раньше использовалась только ``fetch_channel_post_history``; при сбое оставался 1 пост в БД.
+        При ``use_telethon=False`` — только SQLite (для PDF/просмотра сохранённого отчёта без flood wait).
+        """
+        by_id: dict[int, _MetricPostRow] = {}
+        channel_ref = (ch.username or ch.invite_slug or str(ch.telegram_id or "")).strip()
+
+        if use_telethon and self._telegram is not None and channel_ref:
+            try:
+                recent = await self._telegram.fetch_recent_posts(channel_ref, limit=100)
+                self._absorb_metric_briefs(by_id, recent)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "report_metrics recent fetch failed channel_id=%s ref=%r",
+                    ch.id,
+                    channel_ref,
+                    exc_info=True,
+                )
+            try:
+                cap = max(50, min(5000, int(history_limit)))
+                history = await self._telegram.fetch_channel_post_history(channel_ref, limit=cap)
+                self._absorb_metric_briefs(by_id, history)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "report_metrics history fetch failed channel_id=%s ref=%r",
+                    ch.id,
+                    channel_ref,
+                    exc_info=True,
+                )
+
+        res = await self._session.execute(
+            select(Post).where(Post.channel_id == ch.id).order_by(Post.posted_at.asc()),
+        )
+        db_posts = list(res.scalars().all())
+        self._absorb_db_posts_for_metrics(by_id, db_posts)
+
+        if not by_id:
+            return self._to_metric_posts(db_posts)
+
+        merged = sorted(by_id.values(), key=lambda r: (r.posted_at, r.text or ""))
+        logger.info(
+            "report_metrics loaded channel_id=%s telethon_ids=%s db_rows=%s merged=%s",
+            ch.id,
+            len(by_id),
+            len(db_posts),
+            len(merged),
+        )
+        return merged
+
+    def _build_channel_report_metrics_snapshot(
+        self,
+        *,
+        channel: Channel,
+        metric_posts: list[_MetricPostRow],
+        channel_start_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        created_at = channel_start_at or self._resolve_channel_created_at(
+            channel=channel,
+            metric_posts=metric_posts,
+        )
+        total_filtered = count_relevant_posts(metric_posts, since=created_at)
+        posts_30d = count_relevant_posts_last_days(metric_posts, days=30)
+        freq_val = compute_publication_frequency_per_week(
+            total_filtered,
+            channel_created_at=created_at,
+            sample_posts=metric_posts,
+        )
+        freq_text = format_publication_frequency(freq_val)
+        lengths = [len((getattr(p, "text", None) or "").strip()) for p in metric_posts]
+        lengths = [n for n in lengths if n > 0]
+        avg_post_len = int(round(sum(lengths) / len(lengths))) if lengths else None
+        return {
+            "channel_url": channel_public_url(
+                username=channel.username,
+                invite_slug=channel.invite_slug,
+            ),
+            "channel_created_display": format_date_ru(created_at),
+            "channel_age_display": format_channel_age(created_at),
+            "posts_last_30_days": posts_30d,
+            "total_posts_filtered": total_filtered,
+            "publication_frequency": freq_text,
+            "posts_per_week_estimate": round(freq_val, 3) if freq_val is not None else None,
+            "avg_post_length": avg_post_len,
+        }
+
+    def _apply_posts_per_week_estimate(
+        self,
+        ch: Channel,
+        metric_posts: list[_MetricPostRow],
+        *,
+        channel_start_at: datetime | None = None,
+    ) -> None:
+        start_at = channel_start_at or self._resolve_channel_created_at(channel=ch, metric_posts=metric_posts)
+        total_filtered = count_relevant_posts(metric_posts, since=start_at)
+        freq_val = compute_publication_frequency_per_week(
+            total_filtered,
+            channel_created_at=start_at,
+            sample_posts=metric_posts,
+        )
+        ch.posts_per_week_estimate = round(freq_val, 3) if freq_val is not None else None
 
     def _post_to_snippet(self, post: Post) -> PostSnippet | None:
         text = " ".join((post.text or "").split())
@@ -1749,6 +2093,24 @@ class IntelligenceService:
         except json.JSONDecodeError:
             return {}
 
+    @staticmethod
+    def _post_summary_from_llm_dict(data: dict[str, Any], post: PostForAnalysis) -> dict[str, Any]:
+        return {
+            "post_summary_short": str(data.get("post_summary_short") or "").strip(),
+            "post_summary_detailed": str(data.get("post_summary_detailed") or "").strip(),
+            "post_topics": [str(x).strip() for x in (data.get("post_topics") or []) if str(x).strip()][:12],
+            "post_keywords": [str(x).strip() for x in (data.get("post_keywords") or []) if str(x).strip()][:20],
+            "post_entities": [str(x).strip() for x in (data.get("post_entities") or []) if str(x).strip()][:20],
+            "post_tone": str(data.get("post_tone") or "").strip(),
+            "post_search_text": str(data.get("post_search_text") or "").strip() or post.clean_text,
+        }
+
+    def _truncate_post_text_for_summary(self, text: str, *, max_chars: int = 6000) -> str:
+        src = (text or "").strip()
+        if len(src) <= max_chars:
+            return src
+        return src[: max_chars - 1].rstrip() + "…"
+
     async def _build_post_summary(self, post: PostForAnalysis) -> dict[str, Any]:
         model_context_limit = 128000
         reserved_output_tokens = 900
@@ -1765,15 +2127,63 @@ class IntelligenceService:
             f"Текст поста:\n{text_for_prompt}"
         )
         data = await self._summary_json(prompt=prompt)
-        return {
-            "post_summary_short": str(data.get("post_summary_short") or "").strip(),
-            "post_summary_detailed": str(data.get("post_summary_detailed") or "").strip(),
-            "post_topics": [str(x).strip() for x in (data.get("post_topics") or []) if str(x).strip()][:12],
-            "post_keywords": [str(x).strip() for x in (data.get("post_keywords") or []) if str(x).strip()][:20],
-            "post_entities": [str(x).strip() for x in (data.get("post_entities") or []) if str(x).strip()][:20],
-            "post_tone": str(data.get("post_tone") or "").strip(),
-            "post_search_text": str(data.get("post_search_text") or "").strip() or post.clean_text,
-        }
+        return self._post_summary_from_llm_dict(data, post)
+
+    async def _build_posts_summaries_parallel(
+        self,
+        posts: list[PostForAnalysis],
+        *,
+        concurrency: int = 4,
+    ) -> list[dict[str, Any]]:
+        sem = asyncio.Semaphore(max(1, concurrency))
+
+        async def _one(post: PostForAnalysis) -> dict[str, Any]:
+            async with sem:
+                return await self._build_post_summary(post)
+
+        return list(await asyncio.gather(*[_one(p) for p in posts]))
+
+    async def _build_posts_summaries_batched(self, posts: list[PostForAnalysis]) -> list[dict[str, Any]]:
+        """
+        Один LLM-вызов на всё окно постов (как reduce в channel_audit), вместо N последовательных.
+        """
+        n = len(posts)
+        if n == 0:
+            return []
+        if n == 1:
+            return [await self._build_post_summary(posts[0])]
+
+        blocks = [
+            f"[post_index={idx} message_id={post.message_id}]\n"
+            f"{self._truncate_post_text_for_summary(post.clean_text)}"
+            for idx, post in enumerate(posts)
+        ]
+        prompt = (
+            f"Ниже {n} постов Telegram-канала (блоки post_index от 0 до {n - 1}). "
+            f'Верни JSON: {{"posts": [ ... ]}} — массив ровно из {n} объектов в том же порядке. '
+            "Каждый объект: post_summary_short, post_summary_detailed, post_topics (массив строк), "
+            "post_keywords, post_entities, post_tone, post_search_text.\n\n"
+            + "\n\n".join(blocks)
+        )
+        data = await self._summary_json(prompt=prompt)
+        raw = data.get("posts")
+        if not isinstance(raw, list):
+            logger.warning("scenario3 batch posts: missing posts array, fallback parallel")
+            return await self._build_posts_summaries_parallel(posts)
+
+        out: list[dict[str, Any]] = []
+        for idx, post in enumerate(posts):
+            entry = raw[idx] if idx < len(raw) and isinstance(raw[idx], dict) else {}
+            out.append(self._post_summary_from_llm_dict(entry, post))
+
+        if len(out) != n or any(not x.get("post_summary_short") for x in out):
+            logger.warning(
+                "scenario3 batch posts incomplete count=%s expected=%s — fallback parallel",
+                len(out),
+                n,
+            )
+            return await self._build_posts_summaries_parallel(posts)
+        return out
 
     async def _build_window_summary(self, posts_payload: list[dict[str, Any]]) -> dict[str, Any]:
         blob = "\n\n".join(
@@ -1845,13 +2255,21 @@ class IntelligenceService:
         if self._telegram is None:
             raise TelegramTelethonError(self._telegram_live_unavailable_detail())
         channel_ref = self._normalize_channel_ref(body.channel_ref)
+        fetch_limit = max(body.post_limit + 15, min(80, body.post_limit * 4))
+        t0 = perf_counter()
         logger.info(
-            "summarize_recent_posts_by_handle begin channel_ref=%r post_limit=%s",
+            "summarize_recent_posts_by_handle begin channel_ref=%r post_limit=%s fetch_limit=%s",
             channel_ref,
             body.post_limit,
+            fetch_limit,
         )
         info = await self._telegram.get_channel_info(channel_ref)
-        raw_posts = await self._telegram.fetch_recent_posts(channel_ref, limit=max(80, body.post_limit * 5))
+        raw_posts = await self._telegram.fetch_recent_posts(channel_ref, limit=fetch_limit)
+        logger.info(
+            "summarize_recent_posts_by_handle telethon_fetch elapsed=%.2fs raw_posts=%s",
+            perf_counter() - t0,
+            len(raw_posts),
+        )
         total = len(raw_posts)
         prepared: list[PostForAnalysis] = []
         for p in raw_posts:
@@ -1904,12 +2322,23 @@ class IntelligenceService:
         )
         await self._session.commit()
 
+        t_llm = perf_counter()
+        post_summaries = await self._build_posts_summaries_batched(prepared)
+        logger.info(
+            "summarize_recent_posts_by_handle posts_llm elapsed=%.2fs posts=%s mode=batch",
+            perf_counter() - t_llm,
+            len(prepared),
+        )
         post_payloads: list[dict[str, Any]] = []
-        for post in prepared:
-            pdata = await self._build_post_summary(post)
+        for post, pdata in zip(prepared, post_summaries, strict=True):
             post_payloads.append({"message_id": post.message_id, "clean_text": post.clean_text, **pdata, "post": post})
 
+        t_window = perf_counter()
         window = await self._build_window_summary(post_payloads)
+        logger.info(
+            "summarize_recent_posts_by_handle window_llm elapsed=%.2fs",
+            perf_counter() - t_window,
+        )
         openai_client = AsyncOpenAI(api_key=self._settings.openai_api_key)
         post_collection = "telegram_post_summaries"
         window_collection = "telegram_channel_windows"
@@ -1963,7 +2392,13 @@ class IntelligenceService:
         saved_post_points = 0
         saved_window_points = 0
         try:
+            t_emb = perf_counter()
             post_vectors = await openai_client.embeddings.create(model=emb_model, input=post_texts)
+            logger.info(
+                "summarize_recent_posts_by_handle embeddings elapsed=%.2fs vectors=%s",
+                perf_counter() - t_emb,
+                len(post_texts),
+            )
             dim = len(post_vectors.data[0].embedding)
             await self._ensure_scenario3_qdrant_schema(qdrant, dim)
             await qdrant.upsert_vectors_to(
@@ -2023,10 +2458,11 @@ class IntelligenceService:
         finally:
             await qdrant.close()
         logger.info(
-            "summarize_recent_posts_by_handle done channel_id=%s posts_used=%s qdrant_saved=%s",
+            "summarize_recent_posts_by_handle done channel_id=%s posts_used=%s qdrant_saved=%s total_elapsed=%.2fs",
             ch.id,
             len(post_payloads),
             qdrant_saved,
+            perf_counter() - t0,
         )
         return SummarizePostsResponse(
             channel_id=ch.id,

@@ -14,6 +14,8 @@
 | Раздел                                                      | О чём                                                                                       |
 | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
 | [Запуск с Docker Compose](#toc-docker-compose)              | Основной способ поднять API, Qdrant и Web                                                   |
+| [PDF-отчёт анализа канала](#toc-channel-analysis-pdf)       | Экспорт отчёта сценария 2 в браузер                                                           |
+| [Публикация в Telegram](#toc-publishing)                    | AI-посты, инфографика, ручная публикация и сообщения в чат                                   |
 | [Переменные окружения](#toc-environment)                    | Полный перечень `.env` и где задать                                                         |
 | [Примеры curl](#toc-curl-examples)                          | `POST /channels`, `POST /ai/plan_and_collect`, `POST /channels/{id}/collect` + примеры JSON |
 | [База данных и аудит](#toc-database)                        | Путь к SQLite, таблицы, как посмотреть                                                      |
@@ -23,6 +25,45 @@
 | [Схема данных SQLite](#toc-sqlite-schema)                   | ORM, миграции, mermaid                                                                      |
 | [Тесты backend](#toc-backend-tests)                         | Краткий обзор                                                                               |
 
+
+---
+
+<a id="toc-channel-analysis-pdf"></a>
+
+## PDF-отчёт анализа канала
+
+После сценария **«Анализ канала»** (меню **Анализ канала** → **Анализировать канал**) в UI доступна кнопка с иконкой PDF:
+
+- в заголовке **«Результат анализа канала»** (рядом с удалением);
+- в списке **«Сохранённые отчёты»** (без открытия отчёта).
+
+**Поведение:** при нажатии в приложении показывается индикатор ожидания; PDF собирается на API и **открывается в новой вкладке** браузера. Сохранить файл можно стандартной командой браузера (Ctrl+S / «Сохранить»). На сервере отчёты **не кэшируются** на диск.
+
+**API:** `GET /api/v1/analyses/{analysis_id}/pdf` — ответ `application/pdf`, заголовок `Content-Disposition: inline`.
+
+**Реализация:** [`backend/app/services/channel_analysis_pdf.py`](backend/app/services/channel_analysis_pdf.py) (fpdf2, кириллица через DejaVu; в Docker — пакет `fonts-dejavu-core`). Метрики в PDF совпадают с блоком отчёта на экране — см. раздел 10 в [backend/docs/CHANNEL_METRICS.md](backend/docs/CHANNEL_METRICS.md).
+
+---
+
+<a id="toc-publishing"></a>
+
+## Публикация в Telegram
+
+Раздел **«Публикация»** в UI (`/publishing`): генерация постов в стиле автора (**OpenAI**) и отправка через **Telethon user session**.
+
+| Возможность | Кратко |
+|-------------|--------|
+| AI-пост | Тема + объём символов → текст с эмодзи + картинка (или только инфографика) |
+| Предпросмотр | Редактирование текста, замена/удаление изображения → «Опубликовать предпросмотр» |
+| Без редактора | «Сгенерировать и опубликовать» — сразу в канал, статус «Опубликовано» |
+| Ручная публикация | Свой текст и/или файл |
+| Сообщение в чат | От имени вашей сессии |
+
+**API:** префикс **`/api/v1/publishing`** (`GET /channels`, `POST /generate`, `POST /publish-generated`, `POST /publish-manual`, `POST /send-message`).
+
+**Переменные:** `OPENAI_IMAGE_MODEL`, `OPENAI_IMAGE_SIZE`, `OPENAI_IMAGE_QUALITY`, опционально `PUBLISHING_STYLE_PATH` — см. [`.env.example`](.env.example) и [backend/docs/PUBLISHING.md](backend/docs/PUBLISHING.md).
+
+**Telethon:** нужны права администратора/создателя канала с публикацией постов; изображения отправляются как **фото в ленте**, не как файл для скачивания.
 
 ---
 
@@ -124,6 +165,8 @@ docker compose up --build -d
 | `**DATABASE_URL**`                                                 | рекомендуется                  | SQLite по умолчанию: `sqlite+aiosqlite:///./data/app.db` (путь относительно **рабочей директории процесса backend**) |
 | `**OPENAI_API_KEY`**                                               | для LLM/эмбеддингов            | Ключ OpenAI                                                                                                          |
 | `OPENAI_EMBEDDING_MODEL`, `OPENAI_CHAT_MODEL`                      | опционально                    | Модели по умолчанию в `.env.example`                                                                                 |
+| `OPENAI_IMAGE_MODEL`, `OPENAI_IMAGE_SIZE`, `OPENAI_IMAGE_QUALITY`  | опционально                    | Модуль **«Публикация»**: иллюстрации / инфографика ([PUBLISHING.md](backend/docs/PUBLISHING.md))                     |
+| `PUBLISHING_STYLE_PATH`                                            | опционально                    | Файл образцов стиля автора; иначе `context/post_style.txt` или bundled в backend                                     |
 | `OPENAI_EMBEDDING_DIMENSIONS`                                      | опционально                    | Ожидаемая размерность вектора (в коде по умолчанию 1536; `0` — не проверять)                                         |
 | `EMBEDDING_MAX_CHUNK_CHARS`                                        | опционально                    | Лимит символов на чанк перед эмбеддингом                                                                             |
 | `**TELEGRAM_API_ID**`, `**TELEGRAM_API_HASH**`                     | для Telethon                   | С [my.telegram.org](https://my.telegram.org) → API development tools                                                 |
@@ -456,7 +499,8 @@ PYTHONPATH=. python3 -m alembic downgrade -1
 | [backend/docs/CHANNEL_METRICS.md](backend/docs/CHANNEL_METRICS.md)                   | Формулы метрик каналов, веса, `MetricWeights`                                                |
 | [backend/docs/QDRANT_SEMANTIC_LAYER.md](backend/docs/QDRANT_SEMANTIC_LAYER.md)       | `QdrantStore`, `VectorService`, переменные окружения коллекций                               |
 | [backend/docs/TELEGRAM_TELETHON.md](backend/docs/TELEGRAM_TELETHON.md)               | User session, FloodWait, `/telegram/auth/*`, sidecar-сессии                                  |
-| [README_APP_Description.md](README_APP_Description.md)                               | Продуктовое описание: цель системы, ЦА, экономика задачи, пошаговые сценарии 1–8 (UI → endpoints → backend → LLM/RAG → ответ UI), аудит и `needs_review` |
+| [backend/docs/PUBLISHING.md](backend/docs/PUBLISHING.md)                             | Модуль «Публикация»: OpenAI + Telethon, API, предпросмотр, env, стиль автора                 |
+| [README_APP_Description.md](README_APP_Description.md)                               | Продуктовое описание: цель системы, ЦА, экономика задачи, пошаговые сценарии 1–8 и «Публикация» (UI → endpoints → backend → LLM → ответ UI), аудит и `needs_review` |
 
 
 ---

@@ -18,6 +18,19 @@ export function AnalysisReportView({ report }: { report: ChannelAnalysisReport }
   return (
     <div className="mt-4 space-y-6">
       <div className="grid gap-3 md:grid-cols-2">
+        {report.channel_url ? (
+          <div className="rounded-xl border border-zinc-200 p-3 md:col-span-2">
+            <p className="text-xs text-zinc-500">Канал</p>
+            <a
+              href={report.channel_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-1 inline-block text-sm font-medium text-violet-700 hover:text-violet-900 hover:underline"
+            >
+              {report.channel_url}
+            </a>
+          </div>
+        ) : null}
         <div className="rounded-xl border border-zinc-200 p-3">
           <p className="text-xs text-zinc-500">Описание канала</p>
           <p className="mt-1 text-sm text-zinc-800">{report.channel_description}</p>
@@ -41,6 +54,26 @@ export function AnalysisReportView({ report }: { report: ChannelAnalysisReport }
                   timeStyle: "short",
                 })
               : "—"}
+          </p>
+        </div>
+        <div className="rounded-xl border border-zinc-200 p-3">
+          <p className="text-xs text-zinc-500">Канал создан</p>
+          <p className="mt-1 text-sm text-zinc-800">{report.channel_created_display ?? "—"}</p>
+        </div>
+        <div className="rounded-xl border border-zinc-200 p-3">
+          <p className="text-xs text-zinc-500">Возраст канала</p>
+          <p className="mt-1 text-sm text-zinc-800">{report.channel_age_display ?? "—"}</p>
+        </div>
+        <div className="rounded-xl border border-zinc-200 p-3">
+          <p className="text-xs text-zinc-500">Количество постов за последний месяц</p>
+          <p className="mt-1 text-sm text-zinc-800">
+            {report.posts_last_30_days != null ? report.posts_last_30_days.toLocaleString() : "—"}
+          </p>
+        </div>
+        <div className="rounded-xl border border-zinc-200 p-3">
+          <p className="text-xs text-zinc-500">Всего постов</p>
+          <p className="mt-1 text-sm text-zinc-800">
+            {report.total_posts_filtered != null ? report.total_posts_filtered.toLocaleString() : "—"}
           </p>
         </div>
         <div className="rounded-xl border border-zinc-200 p-3">

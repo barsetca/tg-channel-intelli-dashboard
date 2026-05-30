@@ -48,6 +48,9 @@ class Channel(Base, TimestampMixin):
     # Денормализация последнего поста — для таблицы «найти каналы» без JOIN на каждый список
     last_post_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
+    # Дата создания канала в Telegram (поле date сущности Channel в MTProto)
+    telegram_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     # Оценочная частота публикаций (постов в неделю), заполняет воркер по истории постов / снимкам
     posts_per_week_estimate: Mapped[float | None] = mapped_column(Float, nullable=True)
 
