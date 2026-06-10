@@ -15,7 +15,23 @@ class PostDraftLLM(BaseModel):
         description="Краткий промпт на английском для иллюстрации к посту (без текста на картинке)",
     )
     infographic_prompt_en: str = Field(
-        description="Промпт на английском для инфографики, передающей суть поста без дублирования текста",
+        description=(
+            "Промпт на английском для инфографики. Если нужны подписи — перечисли их "
+            "в кавычках кириллицей (Russian text): «…». Не переводи подписи на английский."
+        ),
+    )
+
+
+class ImagePromptFromHintLLM(BaseModel):
+    """Structured output: промпт для Images API по описанию редактора."""
+
+    post_content: str = Field(description="Краткое содержание поста (контекст для визуала)")
+    image_generation_prompt: str = Field(
+        description="Промпт для OpenAI Images: сцена и стиль (обычно на английском)",
+    )
+    labels_on_image_ru: list[str] = Field(
+        default_factory=list,
+        description="Точные русские надписи (кириллица) для отображения на изображении",
     )
 
 

@@ -397,6 +397,24 @@ export type GeneratePostRequest = {
   char_count: number;
   extra_info?: string | null;
   output_mode: PublishingOutputMode;
+  image_size?: string | null;
+  image_quality?: string | null;
+  custom_image_description?: string | null;
+  /** Для AI-поста по умолчанию true — актуальные факты из интернета */
+  use_web_search?: boolean;
+  /** false — только текст и промпт картинки, без OpenAI Images */
+  generate_image?: boolean;
+  media_base64?: string | null;
+  media_filename?: string | null;
+};
+
+export type PublishingImageOptions = {
+  model: string;
+  family: "gpt-image" | "dall-e-3" | "dall-e-2";
+  sizes: string[];
+  qualities: string[];
+  default_size: string;
+  default_quality: string;
 };
 
 export type GeneratedPostResponse = {
@@ -406,8 +424,9 @@ export type GeneratedPostResponse = {
   output_mode: string;
   post_text: string | null;
   image_prompt_used: string;
-  image_model: string;
-  image_base64: string;
+  image_model: string | null;
+  image_base64: string | null;
+  image_generated: boolean;
 };
 
 export type PublishGeneratedRequest = GeneratePostRequest & {
@@ -420,6 +439,7 @@ export type PublishResultResponse = {
   published_at_utc: string;
   had_image: boolean;
   had_text: boolean;
+  had_media?: boolean;
 };
 
 export type PublishGeneratedResponse = {
@@ -431,9 +451,13 @@ export type PublishManualRequest = {
   channel_ref: string;
   text?: string | null;
   image_base64?: string | null;
+  media_base64?: string | null;
+  media_filename?: string | null;
 };
 
 export type SendChatMessageRequest = {
   chat_ref: string;
-  text: string;
+  text?: string | null;
+  media_base64?: string | null;
+  media_filename?: string | null;
 };

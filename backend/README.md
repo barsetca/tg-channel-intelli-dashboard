@@ -67,6 +67,7 @@ Telethon (user session, FloodWait, HTTP-вход): [docs/TELEGRAM_TELETHON.md](d
 | `GET` | `/manual-review`, `/manual-review/export` | Журнал режима **manual_review** (**8**) |
 | `GET` | `/health` | Проверка работоспособности API |
 | `GET`/`POST`/`DELETE` | `/channels`, `/channels/{channel_id}`, `/channels/{channel_id}/collect` | MVP каталога: список, создание, удаление канала из каталога, фон **`collect`** (см. OpenAPI summary) |
+| `GET` | `/publishing/image-options` | Размер/качество для UI |
 | `GET` | `/publishing/channels` | **Публикация**: каналы, куда user session может постить |
 | `GET` | `/publishing/author-style` | Образцы стиля автора для LLM |
 | `POST` | `/publishing/generate` | Генерация текста + изображения (без Telegram) |

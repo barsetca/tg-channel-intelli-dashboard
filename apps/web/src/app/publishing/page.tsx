@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { CheckCircle2 } from "lucide-react";
 import {
   ApiError,
+  fetchPublishingImageOptions,
   generatePublishingPost,
   listPublishableChannels,
   publishGeneratedPost,
@@ -12,6 +14,7 @@ import {
 import type {
   GeneratedPostResponse,
   PublishableChannel,
+  PublishingImageOptions,
   PublishingOutputMode,
   PublishResultResponse,
 } from "@/lib/types/api";
@@ -22,11 +25,27 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
+import { TextareaWithEmoji } from "@/components/textarea-with-emoji";
+import {
+  MediaAttachField,
+  mediaFieldsForApi,
+  type AttachedMedia,
+} from "@/components/media-attach-field";
+import { LoadingOverlay, ModalCard } from "@/components/ui/modal-card";
 
 const selectClass =
   "w-full rounded-xl border border-zinc-300 bg-white px-3 py-2.5 text-sm text-zinc-900 outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-500/20";
 
 type TabId = "ai" | "manual" | "chat";
+
+type LoadingKind = "generate" | "publish-generated" | "publish-channel" | "publish-chat";
+
+const LOADING_MESSAGES: Record<LoadingKind, string> = {
+  generate: "Генерация поста… Текст, веб-поиск и изображение могут занять несколько минут.",
+  "publish-generated": "Генерация и публикация в канал… Подождите, особенно при больших вложениях.",
+  "publish-channel": "Публикация в канал… Загрузка медиафайла в Telegram может занять время.",
+  "publish-chat": "Отправка сообщения… Загрузка медиафайла в Telegram может занять время.",
+};
 
 function channelLabel(ch: PublishableChannel): string {
   const name = ch.title || ch.username || `id ${ch.telegram_channel_id}`;
@@ -35,19 +54,6 @@ function channelLabel(ch: PublishableChannel): string {
 
 function toChannelRef(ch: PublishableChannel): string {
   return ch.username ? `@${ch.username.replace(/^@/, "")}` : String(ch.telegram_channel_id);
-}
-
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = String(reader.result || "");
-      const b64 = dataUrl.includes(",") ? dataUrl.split(",")[1] : dataUrl;
-      resolve(b64 || "");
-    };
-    reader.onerror = () => reject(new Error("Не удалось прочитать файл"));
-    reader.readAsDataURL(file);
-  });
 }
 
 export default function PublishingPage() {
@@ -61,13 +67,20 @@ export default function PublishingPage() {
   const [charCount, setCharCount] = useState(1200);
   const [extraInfo, setExtraInfo] = useState("");
   const [outputMode, setOutputMode] = useState<PublishingOutputMode>("post_with_image");
+  const [imageOptions, setImageOptions] = useState<PublishingImageOptions | null>(null);
+  const [imageSize, setImageSize] = useState("");
+  const [imageQuality, setImageQuality] = useState("");
+  const [customImageDescription, setCustomImageDescription] = useState("");
+  const [generateImage, setGenerateImage] = useState(true);
 
   /** Метаданные последней генерации (для предпросмотра). */
   const [previewMeta, setPreviewMeta] = useState<GeneratedPostResponse | null>(null);
   const [editPostText, setEditPostText] = useState("");
   const [editImageB64, setEditImageB64] = useState<string | null>(null);
+  const [previewAttachment, setPreviewAttachment] = useState<AttachedMedia | null>(null);
 
   const [publishResult, setPublishResult] = useState<PublishResultResponse | null>(null);
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [directPublishSummary, setDirectPublishSummary] = useState<{
     topic: string;
     output_mode: string;
@@ -76,13 +89,16 @@ export default function PublishingPage() {
   } | null>(null);
 
   const [loading, setLoading] = useState(false);
+  const [loadingKind, setLoadingKind] = useState<LoadingKind>("generate");
   const [error, setError] = useState<string | null>(null);
 
   const [manualText, setManualText] = useState("");
-  const [manualImageB64, setManualImageB64] = useState<string | null>(null);
+  const [manualAttachment, setManualAttachment] = useState<AttachedMedia | null>(null);
 
   const [chatRef, setChatRef] = useState("");
   const [chatText, setChatText] = useState("");
+  const [chatAttachment, setChatAttachment] = useState<AttachedMedia | null>(null);
+  const [aiPublishAttachment, setAiPublishAttachment] = useState<AttachedMedia | null>(null);
 
   const imageSrc = useMemo(
     () => (editImageB64 ? `data:image/png;base64,${editImageB64}` : null),
@@ -90,6 +106,18 @@ export default function PublishingPage() {
   );
 
   const showPreviewEditor = previewMeta !== null;
+
+  const openSuccess = (pub: PublishResultResponse) => {
+    setPublishResult(pub);
+    setShowSuccessModal(true);
+    setError(null);
+  };
+
+  const closeSuccessModal = () => {
+    setShowSuccessModal(false);
+  };
+
+  const loadingMessage = LOADING_MESSAGES[loadingKind];
 
   useEffect(() => {
     void (async () => {
@@ -112,11 +140,30 @@ export default function PublishingPage() {
     })();
   }, []);
 
+  useEffect(() => {
+    void (async () => {
+      try {
+        const opts = await fetchPublishingImageOptions();
+        setImageOptions(opts);
+        setImageSize(opts.default_size);
+        setImageQuality(opts.default_quality);
+      } catch {
+        setImageOptions(null);
+      }
+    })();
+  }, []);
+
   const buildAiBody = () => ({
     topic: topic.trim(),
     char_count: charCount,
     extra_info: extraInfo.trim() || null,
     output_mode: outputMode,
+    image_size: generateImage ? imageSize || null : null,
+    image_quality: generateImage ? imageQuality || null : null,
+    custom_image_description: customImageDescription.trim() || null,
+    use_web_search: true,
+    generate_image: generateImage,
+    ...mediaFieldsForApi(aiPublishAttachment),
   });
 
   const applyGeneratedToEditor = (res: GeneratedPostResponse) => {
@@ -130,11 +177,14 @@ export default function PublishingPage() {
     setPreviewMeta(null);
     setEditPostText("");
     setEditImageB64(null);
+    setPreviewAttachment(null);
   };
 
   const handleGenerate = async () => {
+    setLoadingKind("generate");
     setLoading(true);
     setError(null);
+    setShowSuccessModal(false);
     setPublishResult(null);
     try {
       const res = await generatePublishingPost(buildAiBody());
@@ -153,8 +203,10 @@ export default function PublishingPage() {
       setError("Укажите канал для публикации");
       return;
     }
+    setLoadingKind("publish-generated");
     setLoading(true);
     setError(null);
+    setShowSuccessModal(false);
     setPublishResult(null);
     clearPreviewEditor();
     try {
@@ -162,7 +214,7 @@ export default function PublishingPage() {
         ...buildAiBody(),
         channel_ref: ref,
       });
-      setPublishResult(res.published);
+      openSuccess(res.published);
       setDirectPublishSummary({
         topic: res.generated.topic,
         output_mode: res.generated.output_mode,
@@ -184,23 +236,26 @@ export default function PublishingPage() {
     }
     const publishText =
       outputMode === "infographic_only" ? null : editPostText.trim() || null;
-    if (!publishText && !editImageB64) {
-      setError("Добавьте текст или изображение перед публикацией");
+    const hasMedia = Boolean(previewAttachment || editImageB64);
+    if (!publishText && !hasMedia) {
+      setError("Добавьте текст или медиафайл перед публикацией");
       return;
     }
-    if (outputMode === "infographic_only" && !editImageB64) {
-      setError("Для режима «только инфографика» нужно изображение");
+    if (outputMode === "infographic_only" && !hasMedia) {
+      setError("Для режима «только инфографика» нужен медиафайл");
       return;
     }
+    setLoadingKind("publish-channel");
     setLoading(true);
     setError(null);
+    setShowSuccessModal(false);
     try {
       const pub = await publishManualPost({
         channel_ref: ref,
         text: publishText,
-        image_base64: editImageB64,
+        ...mediaFieldsForApi(previewAttachment, previewAttachment ? null : editImageB64),
       });
-      setPublishResult(pub);
+      openSuccess(pub);
       clearPreviewEditor();
       setDirectPublishSummary(null);
     } catch (e) {
@@ -213,10 +268,16 @@ export default function PublishingPage() {
   const onReplacePreviewImage = async (file: File | null) => {
     if (!file) return;
     try {
-      const b64 = await fileToBase64(file);
-      setEditImageB64(b64 || null);
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = String(reader.result || "");
+        const b64 = dataUrl.includes(",") ? dataUrl.split(",")[1] : dataUrl;
+        setPreviewAttachment({ base64: b64, filename: file.name });
+        setEditImageB64(null);
+      };
+      reader.readAsDataURL(file);
     } catch {
-      setError("Не удалось загрузить изображение");
+      setError("Не удалось загрузить файл");
     }
   };
 
@@ -226,15 +287,21 @@ export default function PublishingPage() {
       setError("Укажите канал");
       return;
     }
+    if (!manualText.trim() && !manualAttachment) {
+      setError("Укажите текст или медиафайл");
+      return;
+    }
+    setLoadingKind("publish-channel");
     setLoading(true);
     setError(null);
+    setShowSuccessModal(false);
     try {
       const pub = await publishManualPost({
         channel_ref: ref,
         text: manualText.trim() || null,
-        image_base64: manualImageB64,
+        ...mediaFieldsForApi(manualAttachment),
       });
-      setPublishResult(pub);
+      openSuccess(pub);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Ошибка публикации");
     } finally {
@@ -243,14 +310,25 @@ export default function PublishingPage() {
   };
 
   const handleSendChat = async () => {
+    if (!chatRef.trim()) {
+      setError("Укажите чат");
+      return;
+    }
+    if (!chatText.trim() && !chatAttachment) {
+      setError("Укажите текст или медиафайл");
+      return;
+    }
+    setLoadingKind("publish-chat");
     setLoading(true);
     setError(null);
+    setShowSuccessModal(false);
     try {
       const pub = await sendTelegramChatMessage({
         chat_ref: chatRef.trim(),
-        text: chatText.trim(),
+        text: chatText.trim() || null,
+        ...mediaFieldsForApi(chatAttachment),
       });
-      setPublishResult(pub);
+      openSuccess(pub);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Ошибка отправки");
     } finally {
@@ -258,16 +336,49 @@ export default function PublishingPage() {
     }
   };
 
-  const onManualFile = (file: File | null) => {
-    if (!file) {
-      setManualImageB64(null);
-      return;
-    }
-    void fileToBase64(file).then(setManualImageB64).catch(() => setError("Не удалось прочитать файл"));
-  };
-
   return (
-    <div className="mx-auto max-w-3xl space-y-8">
+    <div className="relative mx-auto max-w-3xl space-y-8">
+      <LoadingOverlay open={loading} message={loadingMessage} />
+
+      <ModalCard
+        open={showSuccessModal && publishResult !== null}
+        onClose={closeSuccessModal}
+        title="Опубликовано"
+        description={
+          publishResult
+            ? `Сообщение #${publishResult.telegram_message_id} в ${publishResult.peer_ref}`
+            : undefined
+        }
+      >
+        {publishResult ? (
+          <div className="space-y-3">
+            <div className="flex items-start gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-emerald-950">
+              <CheckCircle2 className="mt-0.5 size-5 shrink-0 text-emerald-600" aria-hidden />
+              <div className="text-sm">
+                <p>{new Date(publishResult.published_at_utc).toLocaleString()}</p>
+                {publishResult.had_media ? (
+                  <p className="mt-1 opacity-90">С медиафайлом</p>
+                ) : null}
+                {publishResult.had_text && !publishResult.had_media ? (
+                  <p className="mt-1 opacity-90">Только текст</p>
+                ) : null}
+              </div>
+            </div>
+            {directPublishSummary ? (
+              <p className="text-sm text-zinc-600">
+                Тема: «{directPublishSummary.topic}» · режим:{" "}
+                {directPublishSummary.output_mode === "infographic_only"
+                  ? "только инфографика"
+                  : "пост с картинкой"}
+              </p>
+            ) : null}
+            <Button type="button" className="w-full sm:w-auto" onClick={closeSuccessModal}>
+              Закрыть
+            </Button>
+          </div>
+        ) : null}
+      </ModalCard>
+
       <div>
         <h1 className="text-2xl font-semibold tracking-tight text-zinc-900">Публикация в Telegram</h1>
         <p className="mt-2 text-sm text-zinc-600">
@@ -283,20 +394,6 @@ export default function PublishingPage() {
       {error ? (
         <Alert variant="error" title="Ошибка">
           {error}
-        </Alert>
-      ) : null}
-      {publishResult ? (
-        <Alert variant="info" title="Опубликовано">
-          Сообщение #{publishResult.telegram_message_id} в {publishResult.peer_ref},{" "}
-          {new Date(publishResult.published_at_utc).toLocaleString()}
-          {directPublishSummary ? (
-            <span className="mt-2 block text-sm opacity-90">
-              Тема: «{directPublishSummary.topic}» · режим:{" "}
-              {directPublishSummary.output_mode === "infographic_only"
-                ? "только инфографика"
-                : "пост с картинкой"}
-            </span>
-          ) : null}
         </Alert>
       ) : null}
 
@@ -327,7 +424,7 @@ export default function PublishingPage() {
             <CardTitle>AI-пост с иллюстрацией</CardTitle>
             <CardDescription className="mt-1">
               «Предпросмотр» — правка текста и картинки, затем публикация. «Сгенерировать и опубликовать» — сразу
-              в канал без редактора.
+              в канал без редактора. Перед генерацией текста выполняется поиск актуальной информации в интернете.
             </CardDescription>
           </div>
 
@@ -390,12 +487,74 @@ export default function PublishingPage() {
             </div>
           </div>
 
+          {imageOptions && generateImage ? (
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label>Размер изображения</Label>
+                <select
+                  className={selectClass}
+                  value={imageSize}
+                  onChange={(e) => setImageSize(e.target.value)}
+                >
+                  {imageOptions.sizes.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-zinc-500">Модель: {imageOptions.model}</p>
+              </div>
+              {imageOptions.qualities.length > 0 ? (
+                <div className="space-y-2">
+                  <Label>Качество изображения</Label>
+                  <select
+                    className={selectClass}
+                    value={imageQuality}
+                    onChange={(e) => setImageQuality(e.target.value)}
+                  >
+                    {imageOptions.qualities.map((q) => (
+                      <option key={q} value={q}>
+                        {q}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          <label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-700">
+            <input
+              type="checkbox"
+              checked={generateImage}
+              onChange={(e) => setGenerateImage(e.target.checked)}
+              className="rounded border-zinc-300 text-violet-600 focus:ring-violet-500"
+            />
+            Генерировать изображение (OpenAI Images)
+          </label>
+
+          <div className="space-y-2">
+            <Label>Промпт для изображения (необязательно)</Label>
+            <Textarea
+              rows={2}
+              value={customImageDescription}
+              onChange={(e) => setCustomImageDescription(e.target.value)}
+              placeholder="Опишите желаемую картинку — LLM сформирует промпт. Пусто = стандартный алгоритм. Работает и без генерации картинки"
+            />
+          </div>
+
+          <MediaAttachField
+            label="Прикрепить файл при «Сгенерировать и опубликовать» (необязательно)"
+            value={aiPublishAttachment}
+            onChange={setAiPublishAttachment}
+          />
+
           <div className="space-y-2">
             <Label>Дополнительно (необязательно)</Label>
-            <Textarea
+            <TextareaWithEmoji
               rows={3}
               value={extraInfo}
-              onChange={(e) => setExtraInfo(e.target.value)}
+              onChange={setExtraInfo}
               placeholder="Факты, тезисы, ссылки — что учесть в посте"
             />
           </div>
@@ -422,56 +581,92 @@ export default function PublishingPage() {
               {outputMode === "post_with_image" ? (
                 <div className="space-y-2">
                   <Label>Текст поста ({editPostText.length} зн.)</Label>
-                  <Textarea
+                  <TextareaWithEmoji
                     rows={12}
                     value={editPostText}
-                    onChange={(e) => setEditPostText(e.target.value)}
+                    onChange={setEditPostText}
                     className="font-sans text-sm"
                   />
                 </div>
               ) : (
                 <div className="space-y-2">
                   <Label>Черновик смысла (в канал не уходит, {editPostText.length} зн.)</Label>
-                  <Textarea
+                  <TextareaWithEmoji
                     rows={6}
                     value={editPostText}
-                    onChange={(e) => setEditPostText(e.target.value)}
+                    onChange={setEditPostText}
                     className="font-sans text-sm text-zinc-600"
                   />
                 </div>
               )}
 
               <div className="space-y-2">
-                <Label>Изображение</Label>
+                <Label>
+                  {previewMeta.image_generated ? "Изображение" : "Промпт для генерации изображения"}
+                </Label>
+                {!previewMeta.image_generated ? (
+                  <Textarea
+                    readOnly
+                    rows={6}
+                    value={previewMeta.image_prompt_used}
+                    className="font-mono text-xs text-zinc-700"
+                  />
+                ) : null}
                 {imageSrc ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img src={imageSrc} alt="Предпросмотр" className="max-h-96 w-full rounded-lg object-contain bg-white" />
-                ) : (
+                ) : previewMeta.image_generated ? (
                   <p className="rounded-lg border border-dashed border-zinc-300 bg-white px-4 py-8 text-center text-sm text-zinc-500">
-                    Изображение удалено — можно загрузить другое или опубликовать только текст
+                    Изображение не сгенерировано
                   </p>
-                )}
+                ) : null}
+                {!previewMeta.image_generated && previewMeta.image_prompt_used ? (
+                  <p className="text-xs text-zinc-500">
+                    Картинка не создавалась — можно прикрепить файл ниже или опубликовать только текст.
+                  </p>
+                ) : null}
                 <div className="flex flex-wrap gap-2">
                   <label className="cursor-pointer">
                     <span className="inline-flex rounded-xl bg-white px-3 py-2 text-sm font-medium text-violet-700 ring-1 ring-violet-200 hover:bg-violet-50">
-                      Заменить картинку
+                      {previewMeta.image_generated ? "Заменить картинку" : "Прикрепить медиа"}
                     </span>
                     <input
                       type="file"
-                      accept="image/*"
+                      accept="image/*,video/*,audio/*"
                       className="hidden"
                       onChange={(e) => void onReplacePreviewImage(e.target.files?.[0] ?? null)}
                     />
                   </label>
-                  {editImageB64 ? (
-                    <Button type="button" variant="ghost" onClick={() => setEditImageB64(null)}>
-                      Удалить картинку
+                  {(editImageB64 || previewAttachment) && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      onClick={() => {
+                        setEditImageB64(null);
+                        setPreviewAttachment(null);
+                      }}
+                    >
+                      Убрать медиа
                     </Button>
-                  ) : null}
+                  )}
                 </div>
+                {previewAttachment ? (
+                  <p className="text-xs text-zinc-600">Файл: {previewAttachment.filename}</p>
+                ) : null}
               </div>
 
-              <p className="text-xs text-zinc-500">Промпт генерации: {previewMeta.image_prompt_used}</p>
+              {previewMeta.image_generated ? (
+                <p className="text-xs text-zinc-500">Промпт генерации: {previewMeta.image_prompt_used}</p>
+              ) : null}
+
+              <MediaAttachField
+                label="Медиафайл к публикации (приоритет над сгенерированной картинкой)"
+                value={previewAttachment}
+                onChange={(m) => {
+                  setPreviewAttachment(m);
+                  if (m) setEditImageB64(null);
+                }}
+              />
 
               <div className="flex flex-wrap gap-3 border-t border-violet-100 pt-4">
                 <Button
@@ -495,7 +690,7 @@ export default function PublishingPage() {
         <Card className="space-y-5 p-6">
           <div>
             <CardTitle>Ручная публикация в канал</CardTitle>
-            <CardDescription className="mt-1">Готовый текст и/или изображение без AI</CardDescription>
+            <CardDescription className="mt-1">Готовый текст и/или один медиафайл без AI</CardDescription>
           </div>
           <div className="space-y-2">
             <Label>Канал</Label>
@@ -503,12 +698,9 @@ export default function PublishingPage() {
           </div>
           <div className="space-y-2">
             <Label>Текст</Label>
-            <Textarea rows={8} value={manualText} onChange={(e) => setManualText(e.target.value)} />
+            <TextareaWithEmoji rows={8} value={manualText} onChange={setManualText} />
           </div>
-          <div className="space-y-2">
-            <Label>Изображение</Label>
-            <Input type="file" accept="image/*" onChange={(e) => onManualFile(e.target.files?.[0] ?? null)} />
-          </div>
+          <MediaAttachField value={manualAttachment} onChange={setManualAttachment} />
           <Button type="button" disabled={loading} onClick={() => void handleManualPublish()}>
             Опубликовать
           </Button>
@@ -531,9 +723,14 @@ export default function PublishingPage() {
           </div>
           <div className="space-y-2">
             <Label>Текст</Label>
-            <Textarea rows={4} value={chatText} onChange={(e) => setChatText(e.target.value)} />
+            <TextareaWithEmoji rows={4} value={chatText} onChange={setChatText} />
           </div>
-          <Button type="button" disabled={loading || !chatRef.trim() || !chatText.trim()} onClick={() => void handleSendChat()}>
+          <MediaAttachField value={chatAttachment} onChange={setChatAttachment} />
+          <Button
+            type="button"
+            disabled={loading || !chatRef.trim() || (!chatText.trim() && !chatAttachment)}
+            onClick={() => void handleSendChat()}
+          >
             Отправить
           </Button>
         </Card>

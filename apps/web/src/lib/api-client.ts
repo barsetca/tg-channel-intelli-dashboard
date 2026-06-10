@@ -33,6 +33,7 @@ import type {
   PublishableChannel,
   GeneratePostRequest,
   GeneratedPostResponse,
+  PublishingImageOptions,
   PublishGeneratedRequest,
   PublishGeneratedResponse,
   PublishManualRequest,
@@ -309,6 +310,10 @@ export function exportChannelsUrl(format: "json" | "csv"): string {
 
 export async function listPublishableChannels(): Promise<PublishableChannel[]> {
   return jsonFetch<PublishableChannel[]>("/api/v1/publishing/channels");
+}
+
+export async function fetchPublishingImageOptions(): Promise<PublishingImageOptions> {
+  return jsonFetch<PublishingImageOptions>("/api/v1/publishing/image-options");
 }
 
 export async function generatePublishingPost(body: GeneratePostRequest): Promise<GeneratedPostResponse> {

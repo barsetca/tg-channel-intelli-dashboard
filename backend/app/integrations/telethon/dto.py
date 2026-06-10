@@ -52,6 +52,7 @@ class TelegramPublishResult(BaseModel):
     published_at_utc: datetime
     had_image: bool
     had_text: bool
+    had_media: bool = False
 
 
 class TelegramPostBrief(BaseModel):

@@ -31,7 +31,8 @@ app/publishing/
 ├── __init__.py          # экспорт PublishingService
 ├── service.py           # оркестрация: generate, publish, list channels
 ├── generator.py         # PostContentGenerator (OpenAI chat + images)
-├── image_api.py         # маппинг size/quality под dall-e-3 vs gpt-image-1
+├── image_api.py         # маппинг size/quality под dall-e-3 vs gpt-image-*
+├── web_research.py      # Responses API + web_search_preview
 ├── style.py             # загрузка образцов стиля автора
 ├── schemas.py           # PostDraftLLM, GeneratedPostContent (internal)
 └── data/
@@ -40,6 +41,7 @@ app/publishing/
 app/schemas/publishing.py        # Pydantic для REST
 app/api/v1/endpoints/publishing.py
 app/ai/prompts/publishing/post_draft.j2
+app/ai/prompts/publishing/image_prompt_from_hint.j2
 
 app/integrations/telethon/
 ├── media_bytes.py       # BytesIO + MIME → фото в ленте, не «файл»
@@ -62,7 +64,15 @@ app/integrations/telethon/
 - `post_with_image` — в канал уходит **картинка + текст** (подпись к фото).
 - `infographic_only` — в канал только **изображение**; текст в UI показывается как черновик смысла (в Telegram не публикуется).
 
-Список каналов: `GET /publishing/channels` (каналы, где сессия — создатель/админ с правом поста). Если список пуст — в UI можно ввести `@username` вручную.
+Список каналов: `GET /publishing/channels`. Опции размера/качества картинки для текущей `OPENAI_IMAGE_MODEL`: `GET /publishing/image-options`.
+
+На вкладке AI-пост в UI:
+
+- **Размер** и **качество** изображения (списки зависят от модели: gpt-image — `1024x1024` / `1536×1024` / `1024×1536` и `low`…`auto`; DALL·E 3 — свои значения; по умолчанию из `.env`).
+- **Промпт для изображения** — если заполнен, второй structured-вызов (`ImagePromptFromHintLLM`: `image_generation_prompt` + `labels_on_image_ru`) формирует промпт с **кириллическими надписями дословно**, если редактор их просит; иначе — промпты из первого вызова.
+- **Веб-поиск** — для AI-поста всегда `use_web_search: true` (Responses API, инструмент `web_search_preview`); факты подставляются в `post_draft.j2`.
+
+Текстовые поля (редактор, ручная публикация, чат): кнопка **«Эмодзи»** (`emoji-picker-react`).
 
 ### Вкладка «Ручная публикация»
 
@@ -74,26 +84,26 @@ app/integrations/telethon/
 
 ## Алгоритм AI-поста
 
-Оптимизированный пайплайн (один structured-вызов chat + один images):
-
 ```mermaid
-flowchart LR
-  A[Тема + объём + extra] --> B[OpenAI Chat structured]
-  B --> C[post_text + illustration_prompt + infographic_prompt]
-  C --> D{output_mode}
-  D -->|post_with_image| E[Images API: illustration]
-  D -->|infographic_only| F[Images API: infographic]
-  E --> G[Telethon send_file как фото]
-  F --> G
+flowchart TD
+  A[Тема + параметры] --> B{use_web_search?}
+  B -->|да| C[Responses API web_search_preview]
+  C --> D[OpenAI Chat structured post_draft]
+  B -->|нет| D
+  D --> E{custom_image_description?}
+  E -->|да| F[Chat structured image_prompt_from_hint]
+  E -->|нет| G[illustration / infographic prompt]
+  F --> H[Images API]
+  G --> H
+  H --> I[Telethon фото в ленте]
 ```
 
-1. Пользователь задаёт **тему**, **число символов** (200–4096), опционально **доп. информацию**, **формат**.
-2. **OpenAI Chat** (`OpenAIStageClient.parse_structured`, модель `OPENAI_CHAT_MODEL`) по шаблону [`post_draft.j2`](../app/ai/prompts/publishing/post_draft.j2) возвращает:
-   - `post_text` — текст с эмодзи в стиле автора;
-   - `illustration_prompt_en` — промпт иллюстрации (англ.);
-   - `infographic_prompt_en` — промпт инфографики (англ.).
-3. **OpenAI Images** (`OPENAI_IMAGE_MODEL`) генерирует PNG/JPEG; параметры `size`/`quality` нормализуются в [`image_api.py`](../app/publishing/image_api.py) под семейство модели.
-4. **Telethon** публикует через `send_file` с `force_document=False`, именем файла и MIME ([`media_bytes.py`](../app/integrations/telethon/media_bytes.py)), чтобы картинка отображалась **в ленте**, а не как вложение «скачать файл».
+1. Пользователь задаёт **тему**, **объём**, **размер/качество** картинки (или дефолты из `.env`), опционально **промпт для изображения**, **доп. информацию**, **формат**.
+2. При **`use_web_search: true`** (по умолчанию для AI-поста) — [`web_research.py`](../app/publishing/web_research.py): OpenAI **Responses API** с `tools=[{"type": "web_search_preview"}]`, результат в шаблон `post_draft.j2`.
+3. **OpenAI Chat** (`parse_structured`, `PostDraftLLM`) — текст поста и/или стандартные промпты для картинки.
+4. Если задан **`custom_image_description`** — второй `parse_structured` (`ImagePromptFromHintLLM`) по [`image_prompt_from_hint.j2`](../app/ai/prompts/publishing/image_prompt_from_hint.j2).
+5. **OpenAI Images** с `image_size` / `image_quality` из запроса (нормализация в [`image_api.py`](../app/publishing/image_api.py)).
+6. **Telethon** — публикация как **фото в ленте** ([`media_bytes.py`](../app/integrations/telethon/media_bytes.py)).
 
 ## REST API
 
@@ -102,8 +112,9 @@ flowchart LR
 | Метод | Путь | Назначение |
 |-------|------|------------|
 | `GET` | `/channels` | Каналы для публикации (admin/creator, broadcast) |
+| `GET` | `/image-options` | Допустимые `sizes` / `qualities` и дефолты для `OPENAI_IMAGE_MODEL` |
 | `GET` | `/author-style` | Превью загруженных образцов стиля + путь к файлу |
-| `POST` | `/generate` | Только генерация (текст + `image_base64`), без Telegram |
+| `POST` | `/generate` | Генерация (текст + `image_base64`); тело см. ниже |
 | `POST` | `/publish-generated` | Генерация + публикация в `channel_ref` |
 | `POST` | `/publish-manual` | Публикация готовых `text` / `image_base64` (в т.ч. после правки предпросмотра) |
 | `POST` | `/send-message` | Сообщение в чат от user session |
@@ -117,7 +128,11 @@ curl -sS -X POST "$BASE/api/v1/publishing/generate" \
     "topic": "ИИ на рынке труда",
     "char_count": 1200,
     "extra_info": null,
-    "output_mode": "post_with_image"
+    "output_mode": "post_with_image",
+    "image_size": "1536x1024",
+    "image_quality": "high",
+    "custom_image_description": null,
+    "use_web_search": true
   }'
 ```
 

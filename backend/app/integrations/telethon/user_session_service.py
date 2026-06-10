@@ -51,7 +51,7 @@ from app.integrations.telethon.exceptions import (
     coerce_to_telegram_error,
     map_telethon_error,
 )
-from app.integrations.telethon.media_bytes import image_bytes_for_telegram_photo
+from app.integrations.telethon.media_bytes import prepare_media_attachment
 from app.integrations.telethon.rate_limit import run_with_optional_flood_retry
 from app.integrations.telethon.session_source import (
     effective_string_session,
@@ -549,33 +549,70 @@ class TelethonUserSessionService:
         *,
         text: str | None = None,
         image_bytes: bytes | None = None,
+        media_bytes: bytes | None = None,
+        media_filename: str | None = None,
     ) -> TelegramPublishResult:
-        """Публикация в канал: фото с подписью, только фото или только текст."""
+        """Публикация в канал: текст, фото/видео/аудио или комбинация."""
         entity = await self.resolve_channel(identifier)
         caption = (text or "").strip() or None
         client = self._ensure_client_ready()
         ref = getattr(entity, "username", None) or str(identifier)
 
-        if image_bytes:
-            photo_file, photo_mime = image_bytes_for_telegram_photo(image_bytes)
+        payload = media_bytes if media_bytes is not None else image_bytes
+        fname = media_filename
+        if payload is None and image_bytes is not None:
+            payload = image_bytes
+            fname = fname or "post.jpg"
 
-            async def _send_photo():
+        if payload:
+            prepared = prepare_media_attachment(payload, fname)
+
+            async def _send_media() -> Message:
+                if prepared.kind == "photo":
+                    return await client.send_file(
+                        entity,
+                        prepared.file,
+                        caption=caption,
+                        force_document=False,
+                        mime_type=prepared.mime,
+                    )
+                if prepared.kind == "video":
+                    return await client.send_file(
+                        entity,
+                        prepared.file,
+                        caption=caption,
+                        force_document=False,
+                        mime_type=prepared.mime,
+                        supports_streaming=True,
+                    )
+                if prepared.kind == "audio":
+                    return await client.send_file(
+                        entity,
+                        prepared.file,
+                        caption=caption,
+                        force_document=False,
+                        mime_type=prepared.mime,
+                    )
                 return await client.send_file(
                     entity,
-                    photo_file,
+                    prepared.file,
                     caption=caption,
-                    force_document=False,
-                    mime_type=photo_mime,
+                    force_document=True,
+                    mime_type=prepared.mime,
                 )
 
-            msg = await self._guarded_call("send_file", _send_photo)
+            msg = await self._guarded_call("send_file", _send_media)
+            had_image = prepared.kind == "photo"
+            had_media = True
         elif caption:
-            async def _send_text():
+            async def _send_text() -> Message:
                 return await client.send_message(entity, caption)
 
             msg = await self._guarded_call("send_message", _send_text)
+            had_image = False
+            had_media = False
         else:
-            raise TelegramInvalidIdentifierError("Нужен текст поста и/или изображение.")
+            raise TelegramInvalidIdentifierError("Нужен текст поста и/или медиафайл.")
 
         if not isinstance(msg, Message):
             raise TelegramTelethonError("Telegram не вернул сообщение после публикации.")
@@ -584,33 +621,86 @@ class TelethonUserSessionService:
             telegram_message_id=int(msg.id),
             peer_ref=str(ref),
             published_at_utc=dt,
-            had_image=bool(image_bytes),
+            had_image=had_image,
             had_text=bool(caption),
+            had_media=had_media,
         )
 
-    async def send_user_message(self, identifier: str | int, *, text: str) -> TelegramPublishResult:
-        """Личное сообщение или сообщение в чат от имени пользователя сессии."""
-        body = text.strip()
-        if not body:
-            raise TelegramInvalidIdentifierError("Пустой текст сообщения.")
+    async def send_user_message(
+        self,
+        identifier: str | int,
+        *,
+        text: str | None = None,
+        media_bytes: bytes | None = None,
+        media_filename: str | None = None,
+    ) -> TelegramPublishResult:
+        """Сообщение в чат: текст и/или один медиафайл."""
+        body = (text or "").strip() or None
+        if not body and not media_bytes:
+            raise TelegramInvalidIdentifierError("Нужен текст и/или медиафайл.")
         client = self._ensure_client_ready()
         entity = await self._guarded_call(
             "get_entity",
             lambda: client.get_entity(identifier),
         )
+        ref = getattr(entity, "username", None) or str(identifier)
 
-        async def _send():
-            return await client.send_message(entity, body)
+        if media_bytes:
+            prepared = prepare_media_attachment(media_bytes, media_filename)
 
-        msg = await self._guarded_call("send_message", _send)
+            async def _send_media() -> Message:
+                if prepared.kind == "photo":
+                    return await client.send_file(
+                        entity,
+                        prepared.file,
+                        caption=body,
+                        force_document=False,
+                        mime_type=prepared.mime,
+                    )
+                if prepared.kind == "video":
+                    return await client.send_file(
+                        entity,
+                        prepared.file,
+                        caption=body,
+                        force_document=False,
+                        mime_type=prepared.mime,
+                        supports_streaming=True,
+                    )
+                if prepared.kind == "audio":
+                    return await client.send_file(
+                        entity,
+                        prepared.file,
+                        caption=body,
+                        force_document=False,
+                        mime_type=prepared.mime,
+                    )
+                return await client.send_file(
+                    entity,
+                    prepared.file,
+                    caption=body,
+                    force_document=True,
+                    mime_type=prepared.mime,
+                )
+
+            msg = await self._guarded_call("send_file", _send_media)
+            had_image = prepared.kind == "photo"
+            had_media = True
+        else:
+            async def _send() -> Message:
+                return await client.send_message(entity, body)
+
+            msg = await self._guarded_call("send_message", _send)
+            had_image = False
+            had_media = False
+
         if not isinstance(msg, Message):
             raise TelegramTelethonError("Telegram не вернул сообщение.")
         dt = _normalize_utc(getattr(msg, "date", None)) or datetime.now(timezone.utc)
-        ref = getattr(entity, "username", None) or str(identifier)
         return TelegramPublishResult(
             telegram_message_id=int(msg.id),
             peer_ref=str(ref),
             published_at_utc=dt,
-            had_image=False,
-            had_text=True,
+            had_image=had_image,
+            had_text=bool(body),
+            had_media=had_media,
         )

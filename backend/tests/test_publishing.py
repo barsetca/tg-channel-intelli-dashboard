@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.core.config import Settings
-from app.publishing.image_api import resolve_openai_image_generate_kwargs
+from app.publishing.image_api import get_publishing_image_options, resolve_openai_image_generate_kwargs
 from app.publishing.schemas import PostDraftLLM
 from app.publishing.style import load_author_style_samples, resolve_style_samples_path
 
@@ -46,3 +46,34 @@ def test_dalle3_maps_medium_to_standard() -> None:
     s = Settings(openai_image_model="dall-e-3", openai_image_quality="medium")
     kw = resolve_openai_image_generate_kwargs(s)
     assert kw["quality"] == "standard"
+
+
+def test_image_options_gpt_image_mini() -> None:
+    s = Settings(openai_image_model="gpt-image-1-mini", openai_image_size="1024x1024", openai_image_quality="medium")
+    opts = get_publishing_image_options(s)
+    assert opts.family == "gpt-image"
+    assert "1024x1024" in opts.sizes
+    assert "medium" in opts.qualities
+    assert opts.default_quality == "medium"
+
+
+def test_image_kwargs_request_override() -> None:
+    s = Settings(openai_image_model="gpt-image-1-mini", openai_image_size="1024x1024", openai_image_quality="low")
+    kw = resolve_openai_image_generate_kwargs(s, size_override="1536x1024", quality_override="high")
+    assert kw["size"] == "1536x1024"
+    assert kw["quality"] == "high"
+
+
+def test_image_prompt_from_hint_schema() -> None:
+    from app.publishing.generator import _finalize_image_prompt_from_hint
+    from app.publishing.schemas import ImagePromptFromHintLLM
+
+    row = ImagePromptFromHintLLM(
+        post_content="Суть поста",
+        image_generation_prompt="modern infographic, friendly robot host, neon cyberpunk style",
+        labels_on_image_ru=["Создай Reels", "Нейросети", "Шаг 1"],
+    )
+    final = _finalize_image_prompt_from_hint(row)
+    assert "«Создай Reels»" in final
+    assert "Cyrillic" in final
+    assert "not translated to English" in final

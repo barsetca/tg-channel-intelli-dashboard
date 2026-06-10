@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 from app.core.config import Settings
 
-_GPT_IMAGE_SIZES = frozenset({"1024x1024", "1536x1024", "1024x1536", "auto"})
-_DALLE3_SIZES = frozenset({"1024x1024", "1792x1024", "1024x1792"})
-_DALLE2_SIZES = frozenset({"256x256", "512x512", "1024x1024"})
+_GPT_IMAGE_SIZES = ("1024x1024", "1536x1024", "1024x1536", "auto")
+_GPT_IMAGE_SIZES_UI = ("1024x1024", "1536x1024", "1024x1536")
+_GPT_IMAGE_QUALITIES = ("low", "medium", "high", "auto")
+_DALLE3_SIZES = ("1024x1024", "1792x1024", "1024x1792")
+_DALLE3_QUALITIES = ("standard", "hd")
+_DALLE2_SIZES = ("256x256", "512x512", "1024x1024")
 
 _SIZE_TO_GPT = {
     "1024x1024": "1024x1024",
@@ -17,6 +21,18 @@ _SIZE_TO_GPT = {
     "1536x1024": "1536x1024",
     "1024x1536": "1024x1536",
 }
+
+ImageModelFamily = Literal["gpt-image", "dall-e-3", "dall-e-2"]
+
+
+@dataclass(frozen=True)
+class PublishingImageOptions:
+    model: str
+    family: ImageModelFamily
+    sizes: tuple[str, ...]
+    qualities: tuple[str, ...]
+    default_size: str
+    default_quality: str
 
 
 def _is_gpt_image_model(model: str) -> bool:
@@ -28,7 +44,56 @@ def _is_dalle3(model: str) -> bool:
     return "dall-e-3" in model.lower() or "dalle-3" in model.lower()
 
 
-def resolve_openai_image_generate_kwargs(settings: Settings) -> dict[str, Any]:
+def detect_image_model_family(model: str) -> ImageModelFamily:
+    if _is_gpt_image_model(model):
+        return "gpt-image"
+    if _is_dalle3(model):
+        return "dall-e-3"
+    return "dall-e-2"
+
+
+def get_publishing_image_options(settings: Settings) -> PublishingImageOptions:
+    """Опции для UI и валидации запроса по текущей OPENAI_IMAGE_MODEL."""
+    model = settings.openai_image_model.strip()
+    family = detect_image_model_family(model)
+    kw = resolve_openai_image_generate_kwargs(settings)
+    default_size = str(kw["size"])
+    default_quality = str(kw.get("quality", "standard"))
+
+    if family == "gpt-image":
+        return PublishingImageOptions(
+            model=model,
+            family=family,
+            sizes=_GPT_IMAGE_SIZES_UI,
+            qualities=_GPT_IMAGE_QUALITIES,
+            default_size=default_size if default_size in _GPT_IMAGE_SIZES_UI else "1024x1024",
+            default_quality=default_quality,
+        )
+    if family == "dall-e-3":
+        return PublishingImageOptions(
+            model=model,
+            family=family,
+            sizes=_DALLE3_SIZES,
+            qualities=_DALLE3_QUALITIES,
+            default_size=default_size,
+            default_quality=default_quality,
+        )
+    return PublishingImageOptions(
+        model=model,
+        family=family,
+        sizes=_DALLE2_SIZES,
+        qualities=(),
+        default_size=default_size,
+        default_quality="",
+    )
+
+
+def resolve_openai_image_generate_kwargs(
+    settings: Settings,
+    *,
+    size_override: str | None = None,
+    quality_override: str | None = None,
+) -> dict[str, Any]:
     """
     Собирает kwargs для ``images.generate``.
 
@@ -37,8 +102,8 @@ def resolve_openai_image_generate_kwargs(settings: Settings) -> dict[str, Any]:
     * **dall-e-2** — без quality; size: до 1024²
     """
     model = settings.openai_image_model.strip()
-    raw_size = (settings.openai_image_size or "1024x1024").strip()
-    raw_quality = (settings.openai_image_quality or "standard").strip().lower()
+    raw_size = (size_override or settings.openai_image_size or "1024x1024").strip()
+    raw_quality = (quality_override or settings.openai_image_quality or "standard").strip().lower()
 
     if _is_gpt_image_model(model):
         size = _SIZE_TO_GPT.get(raw_size, raw_size)
@@ -47,7 +112,7 @@ def resolve_openai_image_generate_kwargs(settings: Settings) -> dict[str, Any]:
         dalle_to_gpt = {"standard": "medium", "hd": "high", "low": "low", "high": "high"}
         if raw_quality in dalle_to_gpt:
             quality = dalle_to_gpt[raw_quality]
-        elif raw_quality in ("low", "medium", "high", "auto"):
+        elif raw_quality in _GPT_IMAGE_QUALITIES:
             quality = raw_quality
         else:
             quality = "auto"
@@ -58,12 +123,11 @@ def resolve_openai_image_generate_kwargs(settings: Settings) -> dict[str, Any]:
         gpt_to_dalle = {"low": "standard", "medium": "standard", "high": "hd", "auto": "standard"}
         if raw_quality in gpt_to_dalle:
             quality = gpt_to_dalle[raw_quality]
-        elif raw_quality in ("standard", "hd"):
+        elif raw_quality in _DALLE3_QUALITIES:
             quality = raw_quality
         else:
             quality = "standard"
         return {"model": model, "size": size, "quality": quality}
 
-    # dall-e-2 и прочие
     size = raw_size if raw_size in _DALLE2_SIZES else "1024x1024"
     return {"model": model, "size": size}
